@@ -13,10 +13,52 @@
       <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
       <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
     </Filter>
+    <Filter Include="Source Files\hlsl">
+      <UniqueIdentifier>{0e4b3e5d-655c-4af7-b8a0-b4e0631ecbc7}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="dx12.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="miscs.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="scene.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <FxCompile Include="hlsl\imguiPS.hlsl">
+      <Filter>Source Files\hlsl</Filter>
+    </FxCompile>
+    <FxCompile Include="hlsl\imguiVS.hlsl">
+      <Filter>Source Files\hlsl</Filter>
+    </FxCompile>
+    <FxCompile Include="hlsl\rtScene.hlsl">
+      <Filter>Source Files\hlsl</Filter>
+    </FxCompile>
+    <FxCompile Include="hlsl\swapChainPS.hlsl">
+      <Filter>Source Files\hlsl</Filter>
+    </FxCompile>
+    <FxCompile Include="hlsl\swapChainVS.hlsl">
+      <Filter>Source Files\hlsl</Filter>
+    </FxCompile>
+    <FxCompile Include="hlsl\gbufferVS.hlsl">
+      <Filter>Source Files\hlsl</Filter>
+    </FxCompile>
+    <FxCompile Include="hlsl\gbufferPS.hlsl">
+      <Filter>Source Files\hlsl</Filter>
+    </FxCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="hlsl\miscs.hlsli">
+      <Filter>Source Files\hlsl</Filter>
+    </None>
   </ItemGroup>
 </Project>
