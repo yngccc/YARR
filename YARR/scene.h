@@ -4,28 +4,34 @@
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_WRITE_IMPLEMENTATION
-#include "libs/stb_image.h"
-#include "libs/stb_image_write.h"
+#include "thirdparty/include/stb_image.h"
+#include "thirdparty/include/stb_image_write.h"
 
 #define TINYGLTF_IMPLEMENTATION
 #define TINYGLTF_NO_INCLUDE_STB_IMAGE
 #define TINYGLTF_NO_INCLUDE_STB_IMAGE_WRITE
-#include "libs/tiny_gltf.h"
+#include "thirdparty/include/tiny_gltf.h"
 
 #define TINYOBJLOADER_IMPLEMENTATION
-#include "libs/tiny_obj_loader.h"
+#include "thirdparty/include/tiny_obj_loader.h"
+
+#include "thirdparty/include/rtxgi/ddgi/DDGIVolume.h"
+#define USE_PIX
+#include "thirdparty/include/rtxgi/pix3.h"
 
 struct ModelVertex {
 	std::array<float, 3> position;
 	std::array<float, 3> normal;
 	std::array<float, 2> texCoords;
+	std::array<float, 3> tangent;
 };
 
 struct ModelPrimitive {
 	int materialIndex;
 	std::vector<ModelVertex> vertices;
-	std::vector<unsigned short> indices;
-	ID3D12Resource* bottomAccelStructBuffer;
+	std::vector<char> indices;
+	int indexSize;
+	ID3D12Resource* blasBuffer = nullptr;
 };
 
 struct ModelMesh {
@@ -42,10 +48,13 @@ struct ModelNode {
 struct ModelMaterial {
 	std::array<float, 4> baseColorFactor;
 	int baseColorTextureIndex;
+	int baseColorTextureSamplerIndex;
+	int normalTextureIndex;
+	int normalTextureSamplerIndex;
 };
 
 struct ModelImage {
-	ID3D12Resource* image;
+	ID3D12Resource* image = nullptr;
 };
 
 struct Model {
@@ -54,7 +63,6 @@ struct Model {
 	std::vector<ModelMesh> meshes;
 	std::vector<ModelMaterial> materials;
 	std::vector<ModelImage> images;
-	std::string name;
 };
 
 struct InstanceInfo {
@@ -62,43 +70,148 @@ struct InstanceInfo {
 	int triangleOffset;
 	int triangleCount;
 	int materialIndex;
+	int padding;
 };
 
 struct TriangleInfo {
 	std::array<std::array<float, 3>, 3> normals;
 	std::array<std::array<float, 2>, 3> texCoords;
+	std::array<std::array<float, 3>, 3> tangents;
 };
 
 struct MaterialInfo {
 	std::array<float, 4> baseColorFactor;
 	int baseColorTextureIndex;
+	int baseColorTextureSamplerIndex;
+	int normalTextureIndex;
+	int normalTextureSamplerIndex;
+};
+
+struct Camera {
+	DirectX::XMVECTOR position = DirectX::XMVectorSet(5, 2, -0.3f, 0);
+	DirectX::XMVECTOR lookAt = DirectX::XMVectorAdd(position, DirectX::XMVectorSet(-1, 0, 0, 0));
+	DirectX::XMVECTOR up = DirectX::XMVectorSet(0, 1, 0, 0);
+	float pitchAngle = 0;
+};
+
+struct SceneInfo {
+	enum Type {
+		Camera,
+		Model,
+		Entity
+	};
+
+	Type type;
+	struct Camera camera;
+	std::string_view name;
+	std::string_view path;
+	std::array<float, 4> rotation;
+	std::array<float, 3> scaling;
+	std::array<float, 3> translation;
+};
+
+struct SceneParser : public Parser {
+	using Parser::Parser;
+
+	bool getInfo(SceneInfo* info) {
+		Token token;
+		if (getToken(&token) && token.type == Token::Identifier) {
+			if (token.str == "Camera") {
+				float numbers[6] = {};
+				for (float& number : numbers) {
+					if (!getToken(&token) || !token.toFloat(&number)) {
+						return false;
+					}
+				}
+				info->type = SceneInfo::Camera;
+				info->camera.position = DirectX::XMVectorSet(numbers[0], numbers[1], numbers[2], 0);
+				info->camera.lookAt = DirectX::XMVector3Normalize(DirectX::XMVectorSet(numbers[3], numbers[4], numbers[5], 0));
+				info->camera.up = DirectX::XMVectorSet(0, 1, 0, 0);
+				info->camera.pitchAngle = DirectX::XMVectorGetX(DirectX::XMVector3AngleBetweenVectors(info->camera.lookAt, DirectX::XMVectorSet(0, 1, 0, 0)));
+				info->camera.pitchAngle = static_cast<float>(M_PI_2) - info->camera.pitchAngle;
+				return true;
+			}
+			else if (token.str == "Model") {
+				info->type = SceneInfo::Model;
+				if (!getToken(&token) || token.type != Token::String) {
+					return false;
+				}
+				info->name = token.str;
+				if (!getToken(&token) || token.type != Token::String) {
+					return false;
+				}
+				info->path = token.str;
+				return true;
+			}
+			else if (token.str == "Entity") {
+				info->type = SceneInfo::Entity;
+				debugPrintf("Entity:");
+				if (getToken(&token) && token.type == Token::String) {
+					debugPrintf(" %.*s", token.str.length(), token.str.data());
+				}
+				float numbers[10] = {};
+				for (float& number : numbers) {
+					if (getToken(&token) && token.toFloat(&number)) {
+						debugPrintf(" %f", number);
+					}
+					else {
+						return false;
+					}
+				}
+				debugPrintf("\n");
+				return true;
+			}
+			else {
+				return false;
+			}
+		}
+		else {
+			return false;
+		}
+	}
 };
 
 struct Scene {
-	std::vector<Model> models;
-	ID3D12Resource* topAccelStructBuffer;
-	ID3D12Resource* instanceInfosBuffer;
-	ID3D12Resource* triangleInfosBuffer;
-	ID3D12Resource* materialInfosBuffer;
-	int instanceCount;
-	int triangleCount;
-	int materialCount;
+	Camera camera;
+	std::unordered_map<std::string, Model> models;
+	ID3D12Resource* tlasBuffer = nullptr;
+	ID3D12Resource* instanceInfosBuffer = nullptr;
+	ID3D12Resource* triangleInfosBuffer = nullptr;
+	ID3D12Resource* materialInfosBuffer = nullptr;
+	int instanceCount = 0;
+	int triangleCount = 0;
+	int materialCount = 0;
+	std::filesystem::path filePath;
 
-	static Scene create() {
-		Scene scene = {};
-		return scene;
+	Scene() {};
+	Scene(const std::filesystem::path& sceneFilePath, DX12Context* dx12) : filePath(sceneFilePath) {
+		setCurrentDirToExeDir();
+		SceneParser parser(sceneFilePath);
+		SceneInfo info;
+		while (parser.getInfo(&info)) {
+			if (info.type == SceneInfo::Camera) {
+				camera = info.camera;
+			}
+			else if (info.type == SceneInfo::Model) {
+				Model model = createModelFromGLTF(info.path, dx12);
+				models.emplace(info.name, model);
+			}
+			else if (info.type == SceneInfo::Entity) {
+			}
+		}
 	}
-	void createModelFromGLTF(DX12Context* dx12, const char* gltfFileName) {
+	Model createModelFromGLTF(const std::filesystem::path& gltfFilePath, DX12Context* dx12) {
 		tinygltf::TinyGLTF gltfLoader;
 		std::string gltfLoadError;
 		std::string gltfLoadWarning;
 		tinygltf::Model gltfModel;
-		bool loadResult = gltfLoader.LoadASCIIFromFile(&gltfModel, &gltfLoadError, &gltfLoadWarning, gltfFileName);
-		assert(loadResult);
+		bool loadSuccess = gltfLoader.LoadASCIIFromFile(&gltfModel, &gltfLoadError, &gltfLoadWarning, gltfFilePath.string());
+		if (!loadSuccess) {
+			throw Exception(std::move(gltfLoadError));
+		}
 		assert(gltfModel.scenes.size() == 1);
 
 		Model model = {};
-		model.name = gltfModel.scenes[0].name;
 		model.nodes.reserve(gltfModel.nodes.size());
 		for (auto& gltfNode : gltfModel.nodes) {
 			DirectX::XMMATRIX transform = DirectX::XMMatrixIdentity();
@@ -135,21 +248,22 @@ struct Scene {
 			for (auto& gltfPrimitive : gltfMesh.primitives) {
 				ModelPrimitive modelPrimitive;
 				modelPrimitive.materialIndex = gltfPrimitive.material;
+				assert(gltfPrimitive.material >= 0 && gltfPrimitive.material < gltfModel.materials.size());
 
-				assert(gltfPrimitive.mode == TINYGLTF_MODE_TRIANGLES);
 				int positionAccessorIndex = gltfPrimitive.attributes.at("POSITION");
 				auto& positionAccessor = gltfModel.accessors[positionAccessorIndex];
 				auto& positionBufferView = gltfModel.bufferViews[positionAccessor.bufferView];
 				auto& positionBuffer = gltfModel.buffers[positionBufferView.buffer];
 				unsigned char* positionData = &positionBuffer.data[positionAccessor.byteOffset + positionBufferView.byteOffset];
-				assert(positionAccessor.type == TINYGLTF_TYPE_VEC3 && positionAccessor.componentType == TINYGLTF_COMPONENT_TYPE_FLOAT && positionBufferView.byteStride == 0);
+				assert(positionAccessor.type == TINYGLTF_TYPE_VEC3 && positionAccessor.componentType == TINYGLTF_COMPONENT_TYPE_FLOAT && (positionBufferView.byteStride == 0 || positionBufferView.byteStride == 12));
+				assert(positionAccessor.count < USHRT_MAX);
 
 				int normalAccessorIndex = gltfPrimitive.attributes.at("NORMAL");
 				auto& normalAccessor = gltfModel.accessors[normalAccessorIndex];
 				auto& normalBufferView = gltfModel.bufferViews[normalAccessor.bufferView];
 				auto& normalBuffer = gltfModel.buffers[normalBufferView.buffer];
 				unsigned char* normalData = &normalBuffer.data[normalAccessor.byteOffset + normalBufferView.byteOffset];
-				assert(normalAccessor.type == TINYGLTF_TYPE_VEC3 && normalAccessor.componentType == TINYGLTF_COMPONENT_TYPE_FLOAT && normalBufferView.byteStride == 0);
+				assert(normalAccessor.type == TINYGLTF_TYPE_VEC3 && normalAccessor.componentType == TINYGLTF_COMPONENT_TYPE_FLOAT && (normalBufferView.byteStride == 0 || normalBufferView.byteStride == 12));
 				assert(normalAccessor.count == positionAccessor.count);
 
 				int uvAccessorIndex = gltfPrimitive.attributes.at("TEXCOORD_0");
@@ -157,14 +271,26 @@ struct Scene {
 				auto& uvBufferView = gltfModel.bufferViews[uvAccessor.bufferView];
 				auto& uvBuffer = gltfModel.buffers[uvBufferView.buffer];
 				unsigned char* uvData = &uvBuffer.data[uvAccessor.byteOffset + uvBufferView.byteOffset];
-				assert(uvAccessor.type == TINYGLTF_TYPE_VEC2 && uvAccessor.componentType == TINYGLTF_COMPONENT_TYPE_FLOAT && uvBufferView.byteStride == 0);
+				assert(uvAccessor.type == TINYGLTF_TYPE_VEC2 && uvAccessor.componentType == TINYGLTF_COMPONENT_TYPE_FLOAT && (uvBufferView.byteStride == 0 || uvBufferView.byteStride == 8));
 				assert(uvAccessor.count == positionAccessor.count);
 
 				auto& indexAccessor = gltfModel.accessors[gltfPrimitive.indices];
 				auto& indexBufferView = gltfModel.bufferViews[indexAccessor.bufferView];
 				auto& indexBuffer = gltfModel.buffers[indexBufferView.buffer];
 				unsigned char* indexData = &indexBuffer.data[indexAccessor.byteOffset + indexBufferView.byteOffset];
-				assert(indexAccessor.count % 3 == 0 && indexAccessor.type == TINYGLTF_TYPE_SCALAR && indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT && indexBufferView.byteStride == 0);
+				assert(indexAccessor.count % 3 == 0 && indexAccessor.type == TINYGLTF_TYPE_SCALAR);
+				if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT) {
+					assert(indexBufferView.byteStride == 0 || indexBufferView.byteStride == 2);
+					modelPrimitive.indexSize = 2;
+				}
+				else if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT) {
+					assert(indexBufferView.byteStride == 0 || indexBufferView.byteStride == 4);
+					modelPrimitive.indexSize = 4;
+				}
+				else {
+					assert(false);
+				}
+				assert(gltfPrimitive.mode == TINYGLTF_MODE_TRIANGLES);
 
 				modelPrimitive.vertices.resize(positionAccessor.count);
 				for (size_t i = 0; i < positionAccessor.count; i += 1) {
@@ -172,14 +298,31 @@ struct Scene {
 					memcpy(modelPrimitive.vertices[i].normal.data(), normalData + i * 12, 12);
 					memcpy(modelPrimitive.vertices[i].texCoords.data(), uvData + i * 8, 8);
 				}
-				modelPrimitive.indices.resize(indexAccessor.count);
-				memcpy(modelPrimitive.indices.data(), indexData, indexAccessor.count * 2);
+				auto tangentAttrib = gltfPrimitive.attributes.find("TANGENT");
+				if (tangentAttrib != gltfPrimitive.attributes.end()) {
+					int tangentAccessorIndex = tangentAttrib->second;
+					auto& tangentAccessor = gltfModel.accessors[tangentAccessorIndex];
+					auto& tangentBufferView = gltfModel.bufferViews[tangentAccessor.bufferView];
+					auto& tangentBuffer = gltfModel.buffers[tangentBufferView.buffer];
+					unsigned char* tangentData = &tangentBuffer.data[tangentAccessor.byteOffset + tangentBufferView.byteOffset];
+					assert(tangentAccessor.type == TINYGLTF_TYPE_VEC4 && tangentAccessor.componentType == TINYGLTF_COMPONENT_TYPE_FLOAT && (tangentBufferView.byteStride == 0 || tangentBufferView.byteStride == 16));
+					assert(tangentAccessor.count == positionAccessor.count);
+					for (size_t i = 0; i < positionAccessor.count; i += 1) {
+						memcpy(modelPrimitive.vertices[i].tangent.data(), tangentData + i * 16, 12);
+					}
+				}
+				else {
+					auto& gltfMaterial = gltfModel.materials[gltfPrimitive.material];
+					assert(gltfMaterial.normalTexture.index < 0);
+				}
+				modelPrimitive.indices.resize(indexAccessor.count * modelPrimitive.indexSize);
+				memcpy(modelPrimitive.indices.data(), indexData, indexAccessor.count * modelPrimitive.indexSize);
 
-				ID3D12Resource* indicesBuffer = dx12->createBuffer(modelPrimitive.indices.size() * 2, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+				ID3D12Resource* indicesBuffer = dx12->createBuffer(modelPrimitive.indices.size(), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
 				ID3D12Resource* vertexPositionsBuffer = dx12->createBuffer(modelPrimitive.vertices.size() * 12, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
 				char* indicesBufferPtr = nullptr;
-				indicesBuffer->Map(0, nullptr, reinterpret_cast<void**>(&indicesBufferPtr));
-				memcpy(indicesBufferPtr, modelPrimitive.indices.data(), modelPrimitive.indices.size() * 2);
+				dx12Assert(indicesBuffer->Map(0, nullptr, reinterpret_cast<void**>(&indicesBufferPtr)));
+				memcpy(indicesBufferPtr, modelPrimitive.indices.data(), modelPrimitive.indices.size());
 				indicesBuffer->Unmap(0, nullptr);
 				char* vertexPositionsBufferPtr = nullptr;
 				vertexPositionsBuffer->Map(0, nullptr, reinterpret_cast<void**>(&vertexPositionsBufferPtr));
@@ -191,41 +334,40 @@ struct Scene {
 
 				D3D12_RAYTRACING_GEOMETRY_DESC meshGeometryDesc = {};
 				meshGeometryDesc.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-				meshGeometryDesc.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
-				meshGeometryDesc.Triangles.IndexFormat = DXGI_FORMAT_R16_UINT;
+				meshGeometryDesc.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_NONE; // D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+				meshGeometryDesc.Triangles.IndexFormat = (modelPrimitive.indexSize == 2) ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT;
 				meshGeometryDesc.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
-				meshGeometryDesc.Triangles.IndexCount = static_cast<UINT>(modelPrimitive.indices.size());
+				meshGeometryDesc.Triangles.IndexCount = static_cast<UINT>(modelPrimitive.indices.size() / modelPrimitive.indexSize);
 				meshGeometryDesc.Triangles.VertexCount = static_cast<UINT>(modelPrimitive.vertices.size());
 				meshGeometryDesc.Triangles.IndexBuffer = indicesBuffer->GetGPUVirtualAddress();
 				meshGeometryDesc.Triangles.VertexBuffer = { vertexPositionsBuffer->GetGPUVirtualAddress(), 12 };
 
-				D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS bottomAccelerationStructInputs = {};
-				bottomAccelerationStructInputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
-				bottomAccelerationStructInputs.NumDescs = 1;
-				bottomAccelerationStructInputs.pGeometryDescs = &meshGeometryDesc;
+				D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS blasInput = {};
+				blasInput.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+				blasInput.NumDescs = 1;
+				blasInput.pGeometryDescs = &meshGeometryDesc;
 
-				D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO bottomAccelerationStructPrebuildInfo;
-				dx12->device->GetRaytracingAccelerationStructurePrebuildInfo(&bottomAccelerationStructInputs, &bottomAccelerationStructPrebuildInfo);
+				D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO blasPrebuildInfo;
+				dx12->device->GetRaytracingAccelerationStructurePrebuildInfo(&blasInput, &blasPrebuildInfo);
 
-				ID3D12Resource* scratchAccelerationStructureBuffer = dx12->createBuffer(bottomAccelerationStructPrebuildInfo.ScratchDataSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
-				ID3D12Resource* bottomAccelerationStructureBuffer = dx12->createBuffer(bottomAccelerationStructPrebuildInfo.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
-				bottomAccelerationStructureBuffer->SetName(L"bottomAccelerationStructureBuffer");
+				ID3D12Resource* blasScratchBuffer = dx12->createBuffer(blasPrebuildInfo.ScratchDataSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+				ID3D12Resource* blasBuffer = dx12->createBuffer(blasPrebuildInfo.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
+				blasBuffer->SetName(L"bottomAccelerationStructureBuffer");
 
-				D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bottomAccelerationStructDesc = {};
-				bottomAccelerationStructDesc.DestAccelerationStructureData = bottomAccelerationStructureBuffer->GetGPUVirtualAddress();
-				bottomAccelerationStructDesc.Inputs = bottomAccelerationStructInputs;
-				bottomAccelerationStructDesc.ScratchAccelerationStructureData = scratchAccelerationStructureBuffer->GetGPUVirtualAddress();
+				D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC blasDesc = {};
+				blasDesc.DestAccelerationStructureData = blasBuffer->GetGPUVirtualAddress();
+				blasDesc.Inputs = blasInput;
+				blasDesc.ScratchAccelerationStructureData = blasScratchBuffer->GetGPUVirtualAddress();
 
 				dx12->setCurrentCommandList();
 				ID3D12GraphicsCommandList4* cmdList = dx12->graphicsCommandLists[dx12->currentGraphicsCommandListIndex].list;
-				cmdList->BuildRaytracingAccelerationStructure(&bottomAccelerationStructDesc, 0, nullptr);
+				cmdList->BuildRaytracingAccelerationStructure(&blasDesc, 0, nullptr);
 				dx12->executeCurrentCommandList();
 				dx12->drainGraphicsCommandQueue();
 
-				modelPrimitive.bottomAccelStructBuffer = bottomAccelerationStructureBuffer;
-				scratchAccelerationStructureBuffer->Release();
+				modelPrimitive.blasBuffer = blasBuffer;
+				blasScratchBuffer->Release();
 
-				// NOTE: will break nsight acceleration structure tracking if released
 				indicesBuffer->Release();
 				vertexPositionsBuffer->Release();
 
@@ -235,11 +377,26 @@ struct Scene {
 		}
 		model.materials.reserve(gltfModel.materials.size());
 		for (auto& gltfMaterial : gltfModel.materials) {
-			ModelMaterial material = {};
-			memcpy(material.baseColorFactor.data(), gltfMaterial.pbrMetallicRoughness.baseColorFactor.data(), 16);
-			material.baseColorTextureIndex = gltfModel.textures[gltfMaterial.pbrMetallicRoughness.baseColorTexture.index].source;
-			assert(material.baseColorTextureIndex >= 0 && material.baseColorTextureIndex < gltfModel.materials.size());
+			ModelMaterial material = { {}, -1, -1, -1, -1 };
+			for (int i = 0; i < 4; i += 1) {
+				material.baseColorFactor[i] = static_cast<float>(gltfMaterial.pbrMetallicRoughness.baseColorFactor[i]);
+			}
+			assert(gltfMaterial.pbrMetallicRoughness.baseColorTexture.index >= 0 && gltfMaterial.pbrMetallicRoughness.baseColorTexture.index < gltfModel.textures.size());
 			assert(gltfMaterial.pbrMetallicRoughness.baseColorTexture.texCoord == 0);
+			auto& baseColorTexture = gltfModel.textures[gltfMaterial.pbrMetallicRoughness.baseColorTexture.index];
+			assert(baseColorTexture.source >= 0 && baseColorTexture.source < gltfModel.images.size());
+			assert(baseColorTexture.sampler >= 0 && baseColorTexture.sampler < gltfModel.samplers.size());
+			material.baseColorTextureIndex = baseColorTexture.source;
+			material.baseColorTextureSamplerIndex = baseColorTexture.sampler;
+			if (gltfMaterial.normalTexture.index >= 0) {
+				assert(gltfMaterial.normalTexture.texCoord == 0);
+				assert(gltfMaterial.normalTexture.scale == 1.0);
+				auto& normalTexture = gltfModel.textures[gltfMaterial.normalTexture.index];
+				assert(normalTexture.source >= 0 && normalTexture.source < gltfModel.images.size());
+				assert(normalTexture.sampler >= 0 && normalTexture.sampler < gltfModel.samplers.size());
+				material.normalTextureIndex = normalTexture.source;
+				material.normalTextureSamplerIndex = normalTexture.sampler;
+			}
 			model.materials.push_back(material);
 		}
 		model.images.reserve(gltfModel.images.size());
@@ -252,7 +409,7 @@ struct Scene {
 				format = DXGI_FORMAT_R8G8_UNORM;
 			}
 			else if (gltfImage.component == 4 && gltfImage.bits == 8 && gltfImage.pixel_type == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE) {
-				format = DXGI_FORMAT_R8G8B8A8_UNORM;
+				format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
 			}
 			assert(format != DXGI_FORMAT_UNKNOWN);
 			ID3D12Resource* image = dx12->createTexture(gltfImage.width, gltfImage.height, 1, 1, format, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -265,15 +422,14 @@ struct Scene {
 			image->SetName(name.c_str());
 			model.images.push_back(ModelImage{ image });
 		}
-
-		models.push_back(std::move(model));
+		return model;
 	}
-	void rebuildTopAccelStruct(DX12Context* dx12) {
-		if (models.size() == 0) {
+	void rebuildTLAS(DX12Context* dx12) {
+		if (models.empty()) {
 			return;
 		}
-		if (topAccelStructBuffer) {
-			topAccelStructBuffer->Release();
+		if (tlasBuffer) {
+			tlasBuffer->Release();
 		}
 		if (instanceInfosBuffer) {
 			instanceInfosBuffer->Release();
@@ -289,31 +445,34 @@ struct Scene {
 			int triangleOffset;
 			int triangleCount;
 			int materialOffset;
-			int imageOffset;
 		};
 		std::vector<std::vector<std::vector<PrimitiveInfo>>> primitiveInfos;
 		std::vector<TriangleInfo> triangleInfos;
 		std::vector<MaterialInfo> materialInfos;
 		int imageCount = 0;
-		for (auto& model : models) {
+		for (auto& [modelName, model] : models) {
 			std::vector<std::vector<PrimitiveInfo>> modelPrimitiveInfos;
 			for (auto& mesh : model.meshes) {
 				std::vector<PrimitiveInfo> meshPrimitiveInfos;
 				for (auto& primitive : mesh.primitives) {
-					int triangleCount = static_cast<int>(primitive.indices.size()) / 3;
-					PrimitiveInfo primitiveInfo = {
-						static_cast<int>(triangleInfos.size()), triangleCount,
-						static_cast<int>(materialInfos.size()), imageCount
-					};
+					int triangleCount = static_cast<int>(primitive.indices.size() / primitive.indexSize) / 3;
+					PrimitiveInfo primitiveInfo = { static_cast<int>(triangleInfos.size()), triangleCount, static_cast<int>(materialInfos.size()) };
 					meshPrimitiveInfos.push_back(primitiveInfo);
-					ModelMaterial& modelMaterial = model.materials[primitive.materialIndex];
-					materialInfos.push_back(MaterialInfo{ modelMaterial.baseColorFactor, imageCount + modelMaterial.baseColorTextureIndex });
-					for (int indexIndex = 0; indexIndex < primitive.indices.size(); indexIndex += 3) {
+					for (int indexIndex = 0; indexIndex < primitive.indices.size() / primitive.indexSize; indexIndex += 3) {
 						TriangleInfo triangleInfo = {};
 						for (int triangleIndex = 0; triangleIndex < 3; triangleIndex += 1) {
-							ModelVertex& vertex = primitive.vertices[primitive.indices[indexIndex + triangleIndex]];
+							char* indexPtr = &primitive.indices[(indexIndex + triangleIndex) * primitive.indexSize];
+							unsigned int index = 0;
+							if (primitive.indexSize == 2) {
+								index = *reinterpret_cast<unsigned short*>(indexPtr);
+							}
+							else {
+								index = *reinterpret_cast<unsigned int*>(indexPtr);
+							}
+							ModelVertex& vertex = primitive.vertices[index];
 							triangleInfo.normals[triangleIndex] = vertex.normal;
 							triangleInfo.texCoords[triangleIndex] = vertex.texCoords;
+							triangleInfo.tangents[triangleIndex] = vertex.tangent;
 						}
 						triangleInfos.push_back(triangleInfo);
 					}
@@ -321,12 +480,20 @@ struct Scene {
 				modelPrimitiveInfos.push_back(std::move(meshPrimitiveInfos));
 			}
 			primitiveInfos.push_back(std::move(modelPrimitiveInfos));
+			for (auto& material : model.materials) {
+				MaterialInfo materialInfo = { material.baseColorFactor, imageCount + material.baseColorTextureIndex, material.baseColorTextureSamplerIndex, -1, -1 };
+				if (material.normalTextureIndex >= 0) {
+					materialInfo.normalTextureIndex = imageCount + material.normalTextureIndex;
+					materialInfo.normalTextureSamplerIndex = material.normalTextureSamplerIndex;
+				}
+				materialInfos.push_back(materialInfo);
+			}
 			imageCount += static_cast<int>(model.images.size());
 		}
-		std::vector<D3D12_RAYTRACING_INSTANCE_DESC> topAccelStructInstanceDescs;
+		std::vector<D3D12_RAYTRACING_INSTANCE_DESC> tlasInstanceDescs;
 		std::vector<InstanceInfo> instanceInfos;
-		for (int modelIndex = 0; modelIndex < models.size(); modelIndex += 1) {
-			Model& model = models[modelIndex];
+		int modelIndex = 0;
+		for (auto& [modelName, model] : models) {
 			std::stack<std::pair<int, DirectX::XMMATRIX>> nodeStack;
 			for (auto& nodeIndex : model.rootNodes) {
 				nodeStack.push(std::make_pair(nodeIndex, model.nodes[nodeIndex].transform));
@@ -342,13 +509,13 @@ struct Scene {
 						D3D12_RAYTRACING_INSTANCE_DESC instanceDesc = {};
 						DirectX::XMStoreFloat3x4(reinterpret_cast<DirectX::XMFLOAT3X4*>(instanceDesc.Transform), node.second);
 						instanceDesc.InstanceMask = 0xff;
-						instanceDesc.AccelerationStructure = primitive.bottomAccelStructBuffer->GetGPUVirtualAddress();
-						topAccelStructInstanceDescs.push_back(instanceDesc);
+						instanceDesc.AccelerationStructure = primitive.blasBuffer->GetGPUVirtualAddress();
+						tlasInstanceDescs.push_back(instanceDesc);
 						InstanceInfo instanceInfo = {};
 						instanceInfo.transformMat = node.second;
 						PrimitiveInfo& primitiveInfo = primitiveInfos[modelIndex][modelNode->meshIndex][primitiveIndex];
-						instanceInfo.triangleOffset = primitiveInfo.triangleCount;
-						instanceInfo.triangleCount = primitiveInfo.triangleOffset;
+						instanceInfo.triangleOffset = primitiveInfo.triangleOffset;
+						instanceInfo.triangleCount = primitiveInfo.triangleCount;
 						instanceInfo.materialIndex = primitiveInfo.materialOffset + primitive.materialIndex;
 						instanceInfos.push_back(instanceInfo);
 					}
@@ -358,6 +525,7 @@ struct Scene {
 					nodeStack.push(std::make_pair(childIndex, childTransform));
 				}
 			}
+			modelIndex += 1;
 		}
 
 		instanceCount = static_cast<int>(instanceInfos.size());
@@ -382,35 +550,35 @@ struct Scene {
 		triangleInfosBuffer->Unmap(0, nullptr);
 		materialInfosBuffer->Unmap(0, nullptr);
 
-		ID3D12Resource* topAccelerationStructInstanceDescsBuffer = dx12->createBuffer(topAccelStructInstanceDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+		ID3D12Resource* tlasInstanceDescsBuffer = dx12->createBuffer(tlasInstanceDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
 		void* instanceDescsBuffer = nullptr;
-		topAccelerationStructInstanceDescsBuffer->Map(0, nullptr, &instanceDescsBuffer);
-		memcpy(instanceDescsBuffer, topAccelStructInstanceDescs.data(), topAccelStructInstanceDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC));
-		topAccelerationStructInstanceDescsBuffer->Unmap(0, nullptr);
+		tlasInstanceDescsBuffer->Map(0, nullptr, &instanceDescsBuffer);
+		memcpy(instanceDescsBuffer, tlasInstanceDescs.data(), tlasInstanceDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC));
+		tlasInstanceDescsBuffer->Unmap(0, nullptr);
 
-		D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS topAccelerationStructInputs = {};
-		topAccelerationStructInputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
-		topAccelerationStructInputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
-		topAccelerationStructInputs.NumDescs = static_cast<UINT>(topAccelStructInstanceDescs.size());
-		topAccelerationStructInputs.InstanceDescs = topAccelerationStructInstanceDescsBuffer->GetGPUVirtualAddress();
+		D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS tlasInputs = {};
+		tlasInputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+		tlasInputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
+		tlasInputs.NumDescs = static_cast<UINT>(tlasInstanceDescs.size());
+		tlasInputs.InstanceDescs = tlasInstanceDescsBuffer->GetGPUVirtualAddress();
 
-		D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO topAccelerationStructPrebuildInfo;
-		dx12->device->GetRaytracingAccelerationStructurePrebuildInfo(&topAccelerationStructInputs, &topAccelerationStructPrebuildInfo);
-		ID3D12Resource* scratchAccelerationBuffer = dx12->createBuffer(topAccelerationStructPrebuildInfo.ScratchDataSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
-		topAccelStructBuffer = dx12->createBuffer(topAccelerationStructPrebuildInfo.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
-		topAccelStructBuffer->SetName(L"topAccelerationStructureBuffer");
+		D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO tlasPrebuildInfo = {};
+		dx12->device->GetRaytracingAccelerationStructurePrebuildInfo(&tlasInputs, &tlasPrebuildInfo);
+		ID3D12Resource* tlasScratchBuffer = dx12->createBuffer(tlasPrebuildInfo.ScratchDataSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+		tlasBuffer = dx12->createBuffer(tlasPrebuildInfo.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
+		tlasBuffer->SetName(L"topAccelerationStructureBuffer");
 
-		D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC topAccelerationStructDesc = {};
-		topAccelerationStructDesc.DestAccelerationStructureData = topAccelStructBuffer->GetGPUVirtualAddress();
-		topAccelerationStructDesc.Inputs = topAccelerationStructInputs;
-		topAccelerationStructDesc.ScratchAccelerationStructureData = scratchAccelerationBuffer->GetGPUVirtualAddress();
+		D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC tlasDesc = {};
+		tlasDesc.DestAccelerationStructureData = tlasBuffer->GetGPUVirtualAddress();
+		tlasDesc.Inputs = tlasInputs;
+		tlasDesc.ScratchAccelerationStructureData = tlasScratchBuffer->GetGPUVirtualAddress();
 
 		dx12->setCurrentCommandList();
 		ID3D12GraphicsCommandList4* cmdList = dx12->graphicsCommandLists[dx12->currentGraphicsCommandListIndex].list;
-		cmdList->BuildRaytracingAccelerationStructure(&topAccelerationStructDesc, 0, nullptr);
+		cmdList->BuildRaytracingAccelerationStructure(&tlasDesc, 0, nullptr);
 		dx12->executeCurrentCommandList();
 		dx12->drainGraphicsCommandQueue();
 
-		topAccelerationStructInstanceDescsBuffer->Release();
+		tlasInstanceDescsBuffer->Release();
 	}
 };

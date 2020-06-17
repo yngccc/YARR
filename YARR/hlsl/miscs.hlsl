@@ -1,3 +1,8 @@
+#ifndef MISCS_HLSL
+#define MISCS_HLSL
+
+const static float PI = 3.1415926535897932f;
+
 float3 linearToSRGB(float3 rgb) {
 	rgb = clamp(rgb, float3(0, 0, 0), float3(1, 1, 1));
 	return max(1.055 * pow(rgb, 0.416666667) - 0.055, 0);
@@ -27,3 +32,5 @@ uint wang_hash(uint seed) {
 	seed = seed ^ (seed >> 15);
 	return seed;
 }
+
+#endif

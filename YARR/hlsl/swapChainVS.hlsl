@@ -1,4 +1,4 @@
-#include "miscs.hlsli"
+#include "miscs.hlsl"
 
 #define rootSig \
 "RootFlags(0)," \

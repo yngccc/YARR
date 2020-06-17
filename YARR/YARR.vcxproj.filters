@@ -16,10 +16,43 @@
     <Filter Include="Source Files\hlsl">
       <UniqueIdentifier>{0e4b3e5d-655c-4af7-b8a0-b4e0631ecbc7}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Source Files\hlsl\rtxgi">
+      <UniqueIdentifier>{9fdb434e-d2b5-43b6-ad02-923cdcf90e97}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\hlsl\rtxgi\ddgi">
+      <UniqueIdentifier>{6cd69566-e2a1-41e2-9bc2-eb26c4238991}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\rtxgi">
+      <UniqueIdentifier>{a53644e0-2771-4893-bea1-f61051e4cae0}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\rtxgi\ddgi">
+      <UniqueIdentifier>{931244e9-d7ba-45f5-bac7-8fdb1a9616ed}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\imgui">
+      <UniqueIdentifier>{c2e4797a-75b4-4bd0-bb97-4d3785c8e728}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp">
       <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\include\rtxgi\Math.cpp">
+      <Filter>Source Files\rtxgi</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\include\rtxgi\Random.cpp">
+      <Filter>Source Files\rtxgi</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\include\rtxgi\ddgi\DDGIVolume.cpp">
+      <Filter>Source Files\rtxgi\ddgi</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\include\imgui\imgui_draw.cpp">
+      <Filter>Source Files\imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\include\imgui\imgui_widgets.cpp">
+      <Filter>Source Files\imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\include\imgui\imgui.cpp">
+      <Filter>Source Files\imgui</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
@@ -32,15 +65,51 @@
     <ClInclude Include="scene.h">
       <Filter>Source Files</Filter>
     </ClInclude>
+    <ClInclude Include="thirdparty\include\rtxgi\Common.h">
+      <Filter>Source Files\rtxgi</Filter>
+    </ClInclude>
+    <ClInclude Include="thirdparty\include\rtxgi\Defines.h">
+      <Filter>Source Files\rtxgi</Filter>
+    </ClInclude>
+    <ClInclude Include="thirdparty\include\rtxgi\Math.h">
+      <Filter>Source Files\rtxgi</Filter>
+    </ClInclude>
+    <ClInclude Include="thirdparty\include\rtxgi\pix3.h">
+      <Filter>Source Files\rtxgi</Filter>
+    </ClInclude>
+    <ClInclude Include="thirdparty\include\rtxgi\pix3_win.h">
+      <Filter>Source Files\rtxgi</Filter>
+    </ClInclude>
+    <ClInclude Include="thirdparty\include\rtxgi\PIXEventsCommon.h">
+      <Filter>Source Files\rtxgi</Filter>
+    </ClInclude>
+    <ClInclude Include="thirdparty\include\rtxgi\PIXEventsGenerated.h">
+      <Filter>Source Files\rtxgi</Filter>
+    </ClInclude>
+    <ClInclude Include="thirdparty\include\rtxgi\Random.h">
+      <Filter>Source Files\rtxgi</Filter>
+    </ClInclude>
+    <ClInclude Include="thirdparty\include\rtxgi\Types.h">
+      <Filter>Source Files\rtxgi</Filter>
+    </ClInclude>
+    <ClInclude Include="thirdparty\include\rtxgi\ddgi\DDGIVolume.h">
+      <Filter>Source Files\rtxgi\ddgi</Filter>
+    </ClInclude>
+    <ClInclude Include="thirdparty\include\rtxgi\ddgi\DDGIVolumeDefines.h">
+      <Filter>Source Files\rtxgi\ddgi</Filter>
+    </ClInclude>
+    <ClInclude Include="thirdparty\include\rtxgi\ddgi\DDGIVolumeDescGPU.h">
+      <Filter>Source Files\rtxgi\ddgi</Filter>
+    </ClInclude>
+    <ClInclude Include="test.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <FxCompile Include="hlsl\imguiPS.hlsl">
       <Filter>Source Files\hlsl</Filter>
     </FxCompile>
     <FxCompile Include="hlsl\imguiVS.hlsl">
-      <Filter>Source Files\hlsl</Filter>
-    </FxCompile>
-    <FxCompile Include="hlsl\rtScene.hlsl">
       <Filter>Source Files\hlsl</Filter>
     </FxCompile>
     <FxCompile Include="hlsl\swapChainPS.hlsl">
@@ -55,10 +124,46 @@
     <FxCompile Include="hlsl\gbufferPS.hlsl">
       <Filter>Source Files\hlsl</Filter>
     </FxCompile>
+    <FxCompile Include="thirdparty\hlsl\ddgi\Irradiance.hlsl">
+      <Filter>Source Files\hlsl\rtxgi\ddgi</Filter>
+    </FxCompile>
+    <FxCompile Include="thirdparty\hlsl\ddgi\ProbeRelocationCS.hlsl">
+      <Filter>Source Files\hlsl\rtxgi\ddgi</Filter>
+    </FxCompile>
+    <FxCompile Include="thirdparty\hlsl\ddgi\ProbeStateClassifierCS.hlsl">
+      <Filter>Source Files\hlsl\rtxgi\ddgi</Filter>
+    </FxCompile>
+    <FxCompile Include="thirdparty\hlsl\ddgi\ProbeDistanceBlendingCS.hlsl">
+      <Filter>Source Files\hlsl\rtxgi\ddgi</Filter>
+    </FxCompile>
+    <FxCompile Include="thirdparty\hlsl\ddgi\ProbeBorderRowUpdateCS.hlsl">
+      <Filter>Source Files\hlsl\rtxgi\ddgi</Filter>
+    </FxCompile>
+    <FxCompile Include="thirdparty\hlsl\ddgi\ProbeBorderColumnUpdateCS.hlsl">
+      <Filter>Source Files\hlsl\rtxgi\ddgi</Filter>
+    </FxCompile>
+    <FxCompile Include="thirdparty\hlsl\ddgi\ProbeStateActivateAllCS.hlsl">
+      <Filter>Source Files\hlsl\rtxgi\ddgi</Filter>
+    </FxCompile>
+    <FxCompile Include="thirdparty\hlsl\ddgi\ProbeRadianceBlendingCS.hlsl">
+      <Filter>Source Files\hlsl\rtxgi\ddgi</Filter>
+    </FxCompile>
+    <FxCompile Include="hlsl\sceneRT.hlsl">
+      <Filter>Source Files\hlsl</Filter>
+    </FxCompile>
+    <FxCompile Include="hlsl\probeRT.hlsl">
+      <Filter>Source Files\hlsl</Filter>
+    </FxCompile>
   </ItemGroup>
   <ItemGroup>
-    <None Include="hlsl\miscs.hlsli">
+    <None Include="hlsl\miscs.hlsl">
       <Filter>Source Files\hlsl</Filter>
+    </None>
+    <None Include="thirdparty\hlsl\Common.hlsl">
+      <Filter>Source Files\hlsl\rtxgi</Filter>
+    </None>
+    <None Include="thirdparty\hlsl\ddgi\ProbeCommon.hlsl">
+      <Filter>Source Files\hlsl\rtxgi\ddgi</Filter>
     </None>
   </ItemGroup>
 </Project>
