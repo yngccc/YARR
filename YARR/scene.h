@@ -15,9 +15,8 @@
 #define TINYOBJLOADER_IMPLEMENTATION
 #include "thirdparty/include/tiny_obj_loader.h"
 
-#include "thirdparty/include/rtxgi/ddgi/DDGIVolume.h"
 #define USE_PIX
-#include "thirdparty/include/rtxgi/pix3.h"
+#include "pix3.h"
 
 struct ModelVertex {
 	std::array<float, 3> position;
@@ -54,7 +53,7 @@ struct ModelMaterial {
 };
 
 struct ModelImage {
-	ID3D12Resource* image = nullptr;
+	DX12Texture image;
 };
 
 struct Model {
@@ -98,7 +97,8 @@ struct SceneInfo {
 	enum Type {
 		Camera,
 		Model,
-		Entity
+		Entity,
+		EndOfFile
 	};
 
 	Type type;
@@ -113,60 +113,59 @@ struct SceneInfo {
 struct SceneParser : public Parser {
 	using Parser::Parser;
 
-	bool getInfo(SceneInfo* info) {
+	void getInfo(SceneInfo& info) {
 		Token token;
-		if (getToken(&token) && token.type == Token::Identifier) {
+		getToken(token);
+		if (token.type == Token::EndOfFile) {
+			info.type = SceneInfo::EndOfFile;
+			return;
+		}
+		else if (token.type == Token::Identifier) {
 			if (token.str == "Camera") {
 				float numbers[6] = {};
 				for (float& number : numbers) {
-					if (!getToken(&token) || !token.toFloat(&number)) {
-						return false;
-					}
+					getToken(token);
+					token.toFloat(number);
 				}
-				info->type = SceneInfo::Camera;
-				info->camera.position = DirectX::XMVectorSet(numbers[0], numbers[1], numbers[2], 0);
-				info->camera.lookAt = DirectX::XMVector3Normalize(DirectX::XMVectorSet(numbers[3], numbers[4], numbers[5], 0));
-				info->camera.up = DirectX::XMVectorSet(0, 1, 0, 0);
-				info->camera.pitchAngle = DirectX::XMVectorGetX(DirectX::XMVector3AngleBetweenVectors(info->camera.lookAt, DirectX::XMVectorSet(0, 1, 0, 0)));
-				info->camera.pitchAngle = static_cast<float>(M_PI_2) - info->camera.pitchAngle;
-				return true;
+				info.type = SceneInfo::Camera;
+				info.camera.position = DirectX::XMVectorSet(numbers[0], numbers[1], numbers[2], 0);
+				info.camera.lookAt = DirectX::XMVector3Normalize(DirectX::XMVectorSet(numbers[3], numbers[4], numbers[5], 0));
+				info.camera.up = DirectX::XMVectorSet(0, 1, 0, 0);
+				info.camera.pitchAngle = DirectX::XMVectorGetX(DirectX::XMVector3AngleBetweenVectors(info.camera.lookAt, DirectX::XMVectorSet(0, 1, 0, 0)));
+				info.camera.pitchAngle = static_cast<float>(M_PI_2) - info.camera.pitchAngle;
 			}
 			else if (token.str == "Model") {
-				info->type = SceneInfo::Model;
-				if (!getToken(&token) || token.type != Token::String) {
-					return false;
+				info.type = SceneInfo::Model;
+				getToken(token);
+				if (token.type != Token::String) {
+					throw Exception("SceneParser::getInfo error: model name token not a string");
 				}
-				info->name = token.str;
-				if (!getToken(&token) || token.type != Token::String) {
-					return false;
+				info.name = token.str;
+				getToken(token);
+				if (token.type != Token::String) {
+					throw Exception("SceneParser::getInfo error: model filePath token not a string");
 				}
-				info->path = token.str;
-				return true;
+				info.path = token.str;
 			}
 			else if (token.str == "Entity") {
-				info->type = SceneInfo::Entity;
-				debugPrintf("Entity:");
-				if (getToken(&token) && token.type == Token::String) {
-					debugPrintf(" %.*s", token.str.length(), token.str.data());
+				info.type = SceneInfo::Entity;
+				getToken(token);
+				if (token.type != Token::String) {
+					throw Exception("SceneParser::getInfo error: entity name token not a string");
 				}
+				info.name = token.str;
 				float numbers[10] = {};
 				for (float& number : numbers) {
-					if (getToken(&token) && token.toFloat(&number)) {
-						debugPrintf(" %f", number);
-					}
-					else {
-						return false;
-					}
+					getToken(token);
+					token.toFloat(number);
 				}
-				debugPrintf("\n");
-				return true;
 			}
 			else {
-				return false;
+				throw Exception("SceneParser::getInfo error: unknown identifer token \"" + std::string(token.str) + "\"");
 			}
 		}
 		else {
-			return false;
+			throw Exception("SceneParser::getInfo error: first token is not an identifier");
 		}
 	}
 };
@@ -174,33 +173,42 @@ struct SceneParser : public Parser {
 struct Scene {
 	Camera camera;
 	std::unordered_map<std::string, Model> models;
-	ID3D12Resource* tlasBuffer = nullptr;
-	ID3D12Resource* instanceInfosBuffer = nullptr;
-	ID3D12Resource* triangleInfosBuffer = nullptr;
-	ID3D12Resource* materialInfosBuffer = nullptr;
+	DX12Buffer tlasBuffer;
+	DX12Buffer instanceInfosBuffer;
+	DX12Buffer triangleInfosBuffer;
+	DX12Buffer materialInfosBuffer;
 	int instanceCount = 0;
 	int triangleCount = 0;
 	int materialCount = 0;
+	std::string name;
 	std::filesystem::path filePath;
 
-	Scene() {};
-	Scene(const std::filesystem::path& sceneFilePath, DX12Context* dx12) : filePath(sceneFilePath) {
+	Scene(const std::string& sceneName) : name(sceneName) {
+	}
+	Scene(const std::string& sceneName, const std::filesystem::path& sceneFilePath, DX12Context& dx12) : name(sceneName), filePath(sceneFilePath) {
 		setCurrentDirToExeDir();
 		SceneParser parser(sceneFilePath);
 		SceneInfo info;
-		while (parser.getInfo(&info)) {
+		while (true) {
+			parser.getInfo(info);
 			if (info.type == SceneInfo::Camera) {
 				camera = info.camera;
 			}
 			else if (info.type == SceneInfo::Model) {
-				Model model = createModelFromGLTF(info.path, dx12);
-				models.emplace(info.name, model);
+				models.insert({ std::string(info.name), createModelFromGLTF(info.path, dx12) });
 			}
 			else if (info.type == SceneInfo::Entity) {
 			}
+			else if (info.type == SceneInfo::EndOfFile) {
+				break;
+			}
+			else {
+				assert(false);
+			}
 		}
 	}
-	Model createModelFromGLTF(const std::filesystem::path& gltfFilePath, DX12Context* dx12) {
+	
+	Model createModelFromGLTF(const std::filesystem::path& gltfFilePath, DX12Context& dx12) {
 		tinygltf::TinyGLTF gltfLoader;
 		std::string gltfLoadError;
 		std::string gltfLoadWarning;
@@ -318,19 +326,19 @@ struct Scene {
 				modelPrimitive.indices.resize(indexAccessor.count * modelPrimitive.indexSize);
 				memcpy(modelPrimitive.indices.data(), indexData, indexAccessor.count * modelPrimitive.indexSize);
 
-				ID3D12Resource* indicesBuffer = dx12->createBuffer(modelPrimitive.indices.size(), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
-				ID3D12Resource* vertexPositionsBuffer = dx12->createBuffer(modelPrimitive.vertices.size() * 12, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+				DX12Buffer indicesBuffer = dx12.createBuffer(modelPrimitive.indices.size(), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+				DX12Buffer vertexPositionsBuffer = dx12.createBuffer(modelPrimitive.vertices.size() * 12, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
 				char* indicesBufferPtr = nullptr;
-				dx12Assert(indicesBuffer->Map(0, nullptr, reinterpret_cast<void**>(&indicesBufferPtr)));
+				dx12Assert(indicesBuffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&indicesBufferPtr)));
 				memcpy(indicesBufferPtr, modelPrimitive.indices.data(), modelPrimitive.indices.size());
-				indicesBuffer->Unmap(0, nullptr);
+				indicesBuffer.buffer->Unmap(0, nullptr);
 				char* vertexPositionsBufferPtr = nullptr;
-				vertexPositionsBuffer->Map(0, nullptr, reinterpret_cast<void**>(&vertexPositionsBufferPtr));
+				vertexPositionsBuffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&vertexPositionsBufferPtr));
 				for (auto& vertex : modelPrimitive.vertices) {
 					memcpy(vertexPositionsBufferPtr, vertex.position.data(), 12);
 					vertexPositionsBufferPtr += 12;
 				}
-				vertexPositionsBuffer->Unmap(0, nullptr);
+				vertexPositionsBuffer.buffer->Unmap(0, nullptr);
 
 				D3D12_RAYTRACING_GEOMETRY_DESC meshGeometryDesc = {};
 				meshGeometryDesc.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
@@ -339,8 +347,8 @@ struct Scene {
 				meshGeometryDesc.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
 				meshGeometryDesc.Triangles.IndexCount = static_cast<UINT>(modelPrimitive.indices.size() / modelPrimitive.indexSize);
 				meshGeometryDesc.Triangles.VertexCount = static_cast<UINT>(modelPrimitive.vertices.size());
-				meshGeometryDesc.Triangles.IndexBuffer = indicesBuffer->GetGPUVirtualAddress();
-				meshGeometryDesc.Triangles.VertexBuffer = { vertexPositionsBuffer->GetGPUVirtualAddress(), 12 };
+				meshGeometryDesc.Triangles.IndexBuffer = indicesBuffer.buffer->GetGPUVirtualAddress();
+				meshGeometryDesc.Triangles.VertexBuffer = { vertexPositionsBuffer.buffer->GetGPUVirtualAddress(), 12 };
 
 				D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS blasInput = {};
 				blasInput.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
@@ -348,28 +356,28 @@ struct Scene {
 				blasInput.pGeometryDescs = &meshGeometryDesc;
 
 				D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO blasPrebuildInfo;
-				dx12->device->GetRaytracingAccelerationStructurePrebuildInfo(&blasInput, &blasPrebuildInfo);
+				dx12.device->GetRaytracingAccelerationStructurePrebuildInfo(&blasInput, &blasPrebuildInfo);
 
-				ID3D12Resource* blasScratchBuffer = dx12->createBuffer(blasPrebuildInfo.ScratchDataSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
-				ID3D12Resource* blasBuffer = dx12->createBuffer(blasPrebuildInfo.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
-				blasBuffer->SetName(L"bottomAccelerationStructureBuffer");
+				DX12Buffer blasScratchBuffer = dx12.createBuffer(blasPrebuildInfo.ScratchDataSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+				DX12Buffer blasBuffer = dx12.createBuffer(blasPrebuildInfo.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
+				blasBuffer.buffer->SetName(L"bottomAccelerationStructureBuffer");
 
 				D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC blasDesc = {};
-				blasDesc.DestAccelerationStructureData = blasBuffer->GetGPUVirtualAddress();
+				blasDesc.DestAccelerationStructureData = blasBuffer.buffer->GetGPUVirtualAddress();
 				blasDesc.Inputs = blasInput;
-				blasDesc.ScratchAccelerationStructureData = blasScratchBuffer->GetGPUVirtualAddress();
+				blasDesc.ScratchAccelerationStructureData = blasScratchBuffer.buffer->GetGPUVirtualAddress();
 
-				dx12->setCurrentCommandList();
-				ID3D12GraphicsCommandList4* cmdList = dx12->graphicsCommandLists[dx12->currentGraphicsCommandListIndex].list;
-				cmdList->BuildRaytracingAccelerationStructure(&blasDesc, 0, nullptr);
-				dx12->executeCurrentCommandList();
-				dx12->drainGraphicsCommandQueue();
+				dx12.waitAndResetGraphicsCommandList();
+				DX12CommandList& cmdList = dx12.graphicsCommandLists[dx12.currentFrame];
+				cmdList.list->BuildRaytracingAccelerationStructure(&blasDesc, 0, nullptr);
+				dx12.closeAndExecuteGraphicsCommandList();
+				dx12.waitAndResetGraphicsCommandList();
 
-				modelPrimitive.blasBuffer = blasBuffer;
-				blasScratchBuffer->Release();
+				modelPrimitive.blasBuffer = blasBuffer.buffer;
 
-				indicesBuffer->Release();
-				vertexPositionsBuffer->Release();
+				blasScratchBuffer.buffer->Release();
+				indicesBuffer.buffer->Release();
+				vertexPositionsBuffer.buffer->Release();
 
 				modelMesh.primitives.push_back(std::move(modelPrimitive));
 			}
@@ -412,33 +420,33 @@ struct Scene {
 				format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
 			}
 			assert(format != DXGI_FORMAT_UNKNOWN);
-			ID3D12Resource* image = dx12->createTexture(gltfImage.width, gltfImage.height, 1, 1, format, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
+			DX12Texture image = dx12.createTexture(gltfImage.width, gltfImage.height, 1, 1, format, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
 			DX12TextureCopy textureCopy = {
-				image, reinterpret_cast<char*>(gltfImage.image.data()), static_cast<int>(gltfImage.image.size()),
+				image, reinterpret_cast<char*>(gltfImage.image.data()), gltfImage.image.size(),
 				D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
 			};
-			dx12->copyTextures(&textureCopy, 1);
+			dx12.copyTextures({ textureCopy });
 			std::wstring name(gltfImage.uri.begin(), gltfImage.uri.end());
-			image->SetName(name.c_str());
+			image.texture->SetName(name.c_str());
 			model.images.push_back(ModelImage{ image });
 		}
 		return model;
 	}
-	void rebuildTLAS(DX12Context* dx12) {
+	void rebuildTLAS(DX12Context& dx12) {
 		if (models.empty()) {
 			return;
 		}
-		if (tlasBuffer) {
-			tlasBuffer->Release();
+		if (tlasBuffer.buffer) {
+			tlasBuffer.buffer->Release();
 		}
-		if (instanceInfosBuffer) {
-			instanceInfosBuffer->Release();
+		if (instanceInfosBuffer.buffer) {
+			instanceInfosBuffer.buffer->Release();
 		}
-		if (triangleInfosBuffer) {
-			triangleInfosBuffer->Release();
+		if (triangleInfosBuffer.buffer) {
+			triangleInfosBuffer.buffer->Release();
 		}
-		if (materialInfosBuffer) {
-			materialInfosBuffer->Release();
+		if (materialInfosBuffer.buffer) {
+			materialInfosBuffer.buffer->Release();
 		}
 
 		struct PrimitiveInfo {
@@ -531,54 +539,54 @@ struct Scene {
 		instanceCount = static_cast<int>(instanceInfos.size());
 		triangleCount = static_cast<int>(triangleInfos.size());
 		materialCount = static_cast<int>(materialInfos.size());
-		instanceInfosBuffer = dx12->createBuffer(instanceInfos.size() * sizeof(InstanceInfo), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
-		triangleInfosBuffer = dx12->createBuffer(triangleInfos.size() * sizeof(TriangleInfo), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
-		materialInfosBuffer = dx12->createBuffer(materialInfos.size() * sizeof(MaterialInfo), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
-		instanceInfosBuffer->SetName(L"instanceInfosBuffer");
-		triangleInfosBuffer->SetName(L"triangleInfosBuffer");
-		materialInfosBuffer->SetName(L"materialInfosBuffer");
+		instanceInfosBuffer = dx12.createBuffer(instanceInfos.size() * sizeof(InstanceInfo), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+		triangleInfosBuffer = dx12.createBuffer(triangleInfos.size() * sizeof(TriangleInfo), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+		materialInfosBuffer = dx12.createBuffer(materialInfos.size() * sizeof(MaterialInfo), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+		instanceInfosBuffer.buffer->SetName(L"instanceInfosBuffer");
+		triangleInfosBuffer.buffer->SetName(L"triangleInfosBuffer");
+		materialInfosBuffer.buffer->SetName(L"materialInfosBuffer");
 		void* instanceInfosBufferPtr = nullptr;
 		void* triangleInfosBufferPtr = nullptr;
 		void* materialInfosBufferPtr = nullptr;
-		instanceInfosBuffer->Map(0, nullptr, &instanceInfosBufferPtr);
-		triangleInfosBuffer->Map(0, nullptr, &triangleInfosBufferPtr);
-		materialInfosBuffer->Map(0, nullptr, &materialInfosBufferPtr);
+		instanceInfosBuffer.buffer->Map(0, nullptr, &instanceInfosBufferPtr);
+		triangleInfosBuffer.buffer->Map(0, nullptr, &triangleInfosBufferPtr);
+		materialInfosBuffer.buffer->Map(0, nullptr, &materialInfosBufferPtr);
 		memcpy(instanceInfosBufferPtr, instanceInfos.data(), instanceInfos.size() * sizeof(InstanceInfo));
 		memcpy(triangleInfosBufferPtr, triangleInfos.data(), triangleInfos.size() * sizeof(TriangleInfo));
 		memcpy(materialInfosBufferPtr, materialInfos.data(), materialInfos.size() * sizeof(MaterialInfo));
-		instanceInfosBuffer->Unmap(0, nullptr);
-		triangleInfosBuffer->Unmap(0, nullptr);
-		materialInfosBuffer->Unmap(0, nullptr);
+		instanceInfosBuffer.buffer->Unmap(0, nullptr);
+		triangleInfosBuffer.buffer->Unmap(0, nullptr);
+		materialInfosBuffer.buffer->Unmap(0, nullptr);
 
-		ID3D12Resource* tlasInstanceDescsBuffer = dx12->createBuffer(tlasInstanceDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+		DX12Buffer tlasInstanceDescsBuffer = dx12.createBuffer(tlasInstanceDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
 		void* instanceDescsBuffer = nullptr;
-		tlasInstanceDescsBuffer->Map(0, nullptr, &instanceDescsBuffer);
+		tlasInstanceDescsBuffer.buffer->Map(0, nullptr, &instanceDescsBuffer);
 		memcpy(instanceDescsBuffer, tlasInstanceDescs.data(), tlasInstanceDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC));
-		tlasInstanceDescsBuffer->Unmap(0, nullptr);
+		tlasInstanceDescsBuffer.buffer->Unmap(0, nullptr);
 
 		D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS tlasInputs = {};
 		tlasInputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
 		tlasInputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
 		tlasInputs.NumDescs = static_cast<UINT>(tlasInstanceDescs.size());
-		tlasInputs.InstanceDescs = tlasInstanceDescsBuffer->GetGPUVirtualAddress();
+		tlasInputs.InstanceDescs = tlasInstanceDescsBuffer.buffer->GetGPUVirtualAddress();
 
 		D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO tlasPrebuildInfo = {};
-		dx12->device->GetRaytracingAccelerationStructurePrebuildInfo(&tlasInputs, &tlasPrebuildInfo);
-		ID3D12Resource* tlasScratchBuffer = dx12->createBuffer(tlasPrebuildInfo.ScratchDataSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
-		tlasBuffer = dx12->createBuffer(tlasPrebuildInfo.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
-		tlasBuffer->SetName(L"topAccelerationStructureBuffer");
+		dx12.device->GetRaytracingAccelerationStructurePrebuildInfo(&tlasInputs, &tlasPrebuildInfo);
+		DX12Buffer tlasScratchBuffer = dx12.createBuffer(tlasPrebuildInfo.ScratchDataSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+		tlasBuffer = dx12.createBuffer(tlasPrebuildInfo.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
+		tlasBuffer.buffer->SetName(L"topAccelerationStructureBuffer");
 
 		D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC tlasDesc = {};
-		tlasDesc.DestAccelerationStructureData = tlasBuffer->GetGPUVirtualAddress();
+		tlasDesc.DestAccelerationStructureData = tlasBuffer.buffer->GetGPUVirtualAddress();
 		tlasDesc.Inputs = tlasInputs;
-		tlasDesc.ScratchAccelerationStructureData = tlasScratchBuffer->GetGPUVirtualAddress();
+		tlasDesc.ScratchAccelerationStructureData = tlasScratchBuffer.buffer->GetGPUVirtualAddress();
 
-		dx12->setCurrentCommandList();
-		ID3D12GraphicsCommandList4* cmdList = dx12->graphicsCommandLists[dx12->currentGraphicsCommandListIndex].list;
+		dx12.waitAndResetGraphicsCommandList();
+		ID3D12GraphicsCommandList4* cmdList = dx12.graphicsCommandLists[dx12.currentFrame].list;
 		cmdList->BuildRaytracingAccelerationStructure(&tlasDesc, 0, nullptr);
-		dx12->executeCurrentCommandList();
-		dx12->drainGraphicsCommandQueue();
+		dx12.closeAndExecuteGraphicsCommandList();
+		dx12.waitAndResetGraphicsCommandList();
 
-		tlasInstanceDescsBuffer->Release();
+		tlasInstanceDescsBuffer.buffer->Release();
 	}
 };

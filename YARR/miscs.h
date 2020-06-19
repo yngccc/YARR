@@ -11,6 +11,7 @@
 #include <shellscalingapi.h>
 #include <comdef.h>
 #include <commdlg.h>
+#include <cderr.h>
 #include <wtsapi32.h>
 #include <initguid.h>
 #undef near
@@ -58,18 +59,6 @@ T align(size_t x, size_t n) {
 	}
 }
 
-struct Exception : public std::exception {
-	std::string err;
-	Exception(const std::string& str) : err(str) {
-	}
-	Exception(std::string&& str) : err(std::move(str)) {
-	}
-	const char* what() const { 
-		return err.c_str(); 
-	}
-};
-
-
 void debugPrintf(const char* fmt...) {
 	char msg[256] = {};
 	va_list vl;
@@ -79,10 +68,25 @@ void debugPrintf(const char* fmt...) {
 	OutputDebugStringA(msg);
 }
 
-std::string getLastErrorStr() {
-	DWORD error = GetLastError();
-	char buf[256];
-	DWORD n = FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM, nullptr, error, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), buf, static_cast<DWORD>(sizeof(buf)), nullptr);
+struct Exception : public std::exception {
+	std::string err;
+	Exception(const std::string& str) : err(str) {
+		debugPrintf("%s\n", err.c_str());
+	}
+	Exception(std::string&& str) : err(std::move(str)) {
+		debugPrintf("%s\n", err.c_str());
+	}
+	const char* what() const {
+		return err.c_str();
+	}
+};
+
+std::string getErrorStr(DWORD error = GetLastError()) {
+	char buf[256] = {};
+	DWORD n = FormatMessageA(
+		FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+		nullptr, error, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+		buf, static_cast<DWORD>(sizeof(buf)), nullptr);
 	if (n == 0) {
 		snprintf(buf, sizeof(buf), "<no error string, FormatMessageA failed>");
 	}
@@ -138,6 +142,7 @@ struct Window {
 	int rawMouseDy = 0;
 	int mouseWheel = 0;
 
+	Window() = default;
 	Window(LRESULT(*wndMsgCallback)(HWND, UINT, WPARAM, LPARAM)) {
 		HMODULE instanceHandle = GetModuleHandle(nullptr);
 		WNDCLASSA windowClass = {};
@@ -150,12 +155,12 @@ struct Window {
 		windowClass.lpszClassName = "YarrWindowClassName";
 		ATOM registerResult = RegisterClassA(&windowClass);
 		if (!registerResult) {
-			throw Exception("RegisterClassA error:" + getLastErrorStr());
+			throw Exception("RegisterClassA error:" + getErrorStr());
 		}
 
 		HRESULT setDpiAwarenessResult = SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE);
 		if (setDpiAwarenessResult != S_OK) {
-			throw Exception("SetProcessDpiAwareness error:" + getLastErrorStr());
+			throw Exception("SetProcessDpiAwareness error:" + getErrorStr());
 		}
 		int screenW = GetSystemMetrics(SM_CXSCREEN);
 		int screenH = GetSystemMetrics(SM_CYSCREEN);
@@ -168,7 +173,7 @@ struct Window {
 		snprintf(window_title, sizeof(window_title), "YARR %d x %d", windowW, windowH);
 		HWND windowHandle = CreateWindowExA(0, windowClass.lpszClassName, window_title, window_style, windowX, windowY, windowW, windowH, nullptr, nullptr, instanceHandle, nullptr);
 		if (!windowHandle) {
-			throw Exception("CreateWindowExA error:" + getLastErrorStr());
+			throw Exception("CreateWindowExA error:" + getErrorStr());
 		}
 
 		RAWINPUTDEVICE rawInputDevice;
@@ -178,13 +183,13 @@ struct Window {
 		rawInputDevice.hwndTarget = windowHandle;
 		BOOL registerSuccess = RegisterRawInputDevices(&rawInputDevice, 1, sizeof(rawInputDevice));
 		if (!registerSuccess) {
-			throw Exception("RegisterRawInputDevices error:" + getLastErrorStr());
+			throw Exception("RegisterRawInputDevices error:" + getErrorStr());
 		}
 
 		RECT windowRect;
 		BOOL getRectSuccess = GetClientRect(windowHandle, &windowRect);
 		if (!getRectSuccess) {
-			throw Exception("GetClientRect error:" + getLastErrorStr());
+			throw Exception("GetClientRect error:" + getErrorStr());
 		}
 
 		handle = windowHandle;
@@ -223,13 +228,13 @@ void setCurrentDirToExeDir() {
 	wchar_t buf[512];
 	DWORD n = GetModuleFileNameW(nullptr, buf, static_cast<DWORD>(countof(buf)));
 	if (n >= countof(buf)) {
-		throw Exception("GetModuleFileNameA error:" + getLastErrorStr());
+		throw Exception("GetModuleFileNameA error:" + getErrorStr());
 	}
 	std::filesystem::path path(buf);
 	std::filesystem::path parentPath = path.parent_path();
 	BOOL success = SetCurrentDirectoryW(parentPath.c_str());
 	if (!success) {
-		throw Exception("SetCurrentDirectoryW error:" + getLastErrorStr());
+		throw Exception("SetCurrentDirectoryW error:" + getErrorStr());
 	}
 }
 
@@ -247,42 +252,58 @@ std::vector<char> readFile(const std::filesystem::path& filePath) {
 	return data;
 }
 
+
 void writeFile(const std::filesystem::path& filePath, const std::string& str) {
 	std::fstream file(filePath, std::ios::out | std::ios_base::trunc | std::ios::binary);
 	file << str;
 }
 
-bool openFileDialog(char* fileBuf, DWORD fileBufSize) {
-	OPENFILENAMEA openFileName = {};
+std::filesystem::path openFileDialog() {
+	std::filesystem::path filePath;
+	wchar_t buf[256] = {};
+	OPENFILENAMEW openFileName = {};
 	openFileName.lStructSize = sizeof(openFileName);
 	openFileName.hwndOwner = GetActiveWindow();
-	openFileName.lpstrFile = fileBuf;
-	openFileName.nMaxFile = fileBufSize;
-	return GetOpenFileNameA(&openFileName);
+	openFileName.lpstrFile = buf;
+	openFileName.nMaxFile = static_cast<DWORD>(countof(buf));
+	BOOL success = GetOpenFileNameW(&openFileName);
+	if (!success) {
+		DWORD error = CommDlgExtendedError();
+		if (error == FNERR_BUFFERTOOSMALL) {
+			throw Exception("GetOpenFileNameW error: FNERR_BUFFERTOOSMALL");
+		}
+		else if (error == FNERR_INVALIDFILENAME) {
+			throw Exception("GetOpenFileNameW error: FNERR_INVALIDFILENAME");
+		}
+		else if (error == FNERR_SUBCLASSFAILURE) {
+			throw Exception("GetOpenFileNameW error: FNERR_SUBCLASSFAILURE");
+		}
+		else {
+			throw Exception("GetOpenFileNameW error: unknown error code");
+		}
+	}
+	filePath = buf;
+	return filePath;
 }
 
 struct Token {
 	enum Type {
 		Identifier,
 		String,
-		Number
+		Number,
+		EndOfFile
 	};
 
 	Type type;
 	std::string_view str;
 
-	bool toFloat(float* fp) {
+	void toFloat(float& fp) {
 		if (type != Number) {
-			return false;
+			throw Exception("Token::toFloat: token is not a Token::Number");
 		}
-		float f = 0;
-		std::from_chars_result result = std::from_chars(str.data(), str.data() + str.length(), f);
-		if (result.ptr == str.data() + str.length()) {
-			*fp = f;
-			return true;
-		}
-		else {
-			return false;
+		std::from_chars_result result = std::from_chars(str.data(), str.data() + str.length(), fp);
+		if (result.ptr != str.data() + str.length()) {
+			throw Exception("Token::toFloat: cannot parse string \"" + std::string(str) + "\"");
 		}
 	}
 };
@@ -293,61 +314,63 @@ struct Parser {
 
 	Parser(const std::filesystem::path& filePath) : fileData(readFile(filePath)) {
 	}
-	bool getToken(Token* token) {
+	void getToken(Token& token) {
 		if (filePos >= fileData.size()) {
-			return false;
+			token.type = Token::EndOfFile;
+			return;
 		}
-		while (isspace(fileData[filePos]) || fileData[filePos] == ':' || fileData[filePos] == '[' || fileData[filePos] == ']' || fileData[filePos] == ',') {
+		while (isspace(static_cast<unsigned char>(fileData[filePos])) || fileData[filePos] == ':' || fileData[filePos] == '[' || fileData[filePos] == ']' || fileData[filePos] == ',') {
 			filePos += 1;
 			if (filePos >= fileData.size()) {
-				return false;
+				token.type = Token::EndOfFile;
+				return;
 			}
 		}
 		if (fileData[filePos] == '"') {
 			filePos += 1;
 			if (filePos > fileData.size()) {
-				return false;
+				throw Exception("Parser::getToken error: cannot parse string, reached end of file before encountering second \"");
 			}
 			const char* ptr = fileData.data() + filePos;
 			size_t len = 0;
 			while (fileData[filePos] != '"') {
 				if (fileData[filePos] == '\n') {
-					return false;
+					throw Exception("Parser::getToken error: cannot parse string, reached newline before encountering second \"");
 				}
 				filePos += 1;
 				len += 1;
+				if (filePos >= fileData.size()) {
+					throw Exception("Parser::getToken error: cannot parse string, reached end of file before encountering second \"");
+				}
 			}
 			filePos += 1;
-			token->type = Token::String;
-			token->str = { ptr, len };
-			return true;
+			token.type = Token::String;
+			token.str = { ptr, len };
 		}
-		else if (isdigit(fileData[filePos]) || fileData[filePos] == '+' || fileData[filePos] == '-' || fileData[filePos] == '.') {
+		else if (isdigit(static_cast<unsigned char>(fileData[filePos])) || fileData[filePos] == '+' || fileData[filePos] == '-' || fileData[filePos] == '.') {
 			const char* ptr = fileData.data() + filePos;
 			size_t len = 1;
 			filePos += 1;
-			while (filePos < fileData.size() && (isalnum(fileData[filePos]) || fileData[filePos] == '.')) {
+			while (filePos < fileData.size() && (isalnum(static_cast<unsigned char>(fileData[filePos])) || fileData[filePos] == '.')) {
 				filePos += 1;
 				len += 1;
 			}
-			token->type = Token::Number;
-			token->str = { ptr, len };
-			return true;
+			token.type = Token::Number;
+			token.str = { ptr, len };
 		}
-		else if (isalpha(fileData[filePos])) {
+		else if (isalpha(static_cast<unsigned char>(fileData[filePos]))) {
 			const char* ptr = fileData.data() + filePos;
 			size_t len = 1;
 			filePos += 1;
-			while (filePos < fileData.size() && (isalnum(fileData[filePos]) || fileData[filePos] == '-' || fileData[filePos] == '_')) {
+			while (filePos < fileData.size() && (isalnum(static_cast<unsigned char>(fileData[filePos])) || fileData[filePos] == '-' || fileData[filePos] == '_')) {
 				filePos += 1;
 				len += 1;
 			}
-			token->type = Token::Identifier;
-			token->str = { ptr, len };
-			return true;
+			token.type = Token::Identifier;
+			token.str = { ptr, len };
 		}
 		else {
-			return false;
+			throw Exception("Parser::getToken error: unknown character "s + fileData[filePos]);
 		}
 	}
 };

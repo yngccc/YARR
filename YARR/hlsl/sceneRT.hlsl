@@ -1,5 +1,4 @@
 #include "miscs.hlsl"
-#include "../thirdparty/hlsl/ddgi/probeCommon.hlsl"
 
 struct InstanceInfo {
 	float4x4 transformMat;
@@ -68,25 +67,6 @@ void rayGen() {
 	RayPayload rayPayload = { float4(0, 0, 0, 0) };
 	TraceRay(scene, RAY_FLAG_NONE, 0xff, 0, 0, 0, rayDesc, rayPayload);
 	colorTexture[pixelIndex.xy] = rayPayload.color;
-
-//	// RTXGI
-//	float3 irradiance = 0.f;
-//#if RTXGI_DDGI_COMPUTE_IRRADIANCE
-//	float3 cameraDirection = normalize(worldPosHitT.xyz - cameraOrigin);
-//	float3 surfaceBias = DDGIGetSurfaceBias(normal, cameraDirection, DDGIVolume);
-//
-//	DDGIVolumeResources resources;
-//	resources.probeIrradianceSRV = DDGIProbeIrradianceSRV;
-//	resources.probeDistanceSRV = DDGIProbeDistanceSRV;
-//	resources.trilinearSampler = TrilinearSampler;
-//#if RTXGI_DDGI_PROBE_RELOCATION
-//	resources.probeOffsets = DDGIProbeOffsets;
-//#endif
-//#if RTXGI_DDGI_PROBE_STATE_CLASSIFIER
-//	resources.probeStates = DDGIProbeStates;
-//#endif
-//	irradiance = DDGIGetVolumeIrradiance(worldPosHitT.xyz, surfaceBias, normal, DDGIVolume, resources);
-//#endif
 }
 
 float2 barycentricsInterpolate(float2 barycentrics, float2 vertexAttrib[3]) {
