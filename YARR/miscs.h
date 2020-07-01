@@ -43,14 +43,22 @@ using namespace std::string_literals;
 
 #define megabytes(n) (n * 1024 * 1024)
 
-template<typename I = size_t, typename T, size_t N>
+typedef int8_t int8;
+typedef uint8_t uint8;
+typedef int16_t int16;
+typedef uint16_t uint16;
+typedef uint32_t uint;
+typedef int64_t int64;
+typedef uint64_t uint64;
+
+template<typename I = uint64, typename T, uint64 N>
 constexpr I countof(T(&)[N]) {
 	return static_cast<I>(N);
 }
 
-template<typename T = size_t>
-T align(size_t x, size_t n) {
-	size_t remainder = x % n;
+template<typename T = uint64>
+T align(uint64 x, uint64 n) {
+	uint64 remainder = x % n;
 	if (remainder == 0) {
 		return static_cast<T>(x);
 	}
@@ -59,53 +67,42 @@ T align(size_t x, size_t n) {
 	}
 }
 
-void debugPrintf(const char* fmt...) {
-	char msg[256] = {};
-	va_list vl;
-	va_start(vl, fmt);
-	vsnprintf(msg, sizeof(msg), fmt, vl);
-	va_end(vl);
-	OutputDebugStringA(msg);
-}
-
-struct Exception : public std::exception {
-	std::string err;
-	Exception(const std::string& str) : err(str) {
-		debugPrintf("%s\n", err.c_str());
+struct Exception {
+	Exception(const char* str) {
+		OutputDebugStringA(str);
 	}
-	Exception(std::string&& str) : err(std::move(str)) {
-		debugPrintf("%s\n", err.c_str());
-	}
-	const char* what() const {
-		return err.c_str();
+	Exception(const std::string& str) {
+		OutputDebugStringA(str.c_str());
 	}
 };
 
 std::string getErrorStr(DWORD error = GetLastError()) {
-	char buf[256] = {};
+	char buf[256] = "";
 	DWORD n = FormatMessageA(
 		FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
 		nullptr, error, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
 		buf, static_cast<DWORD>(sizeof(buf)), nullptr);
 	if (n == 0) {
-		snprintf(buf, sizeof(buf), "<no error string, FormatMessageA failed>");
+		return "<no error string, FormatMessageA failed>";
 	}
-	return buf;
+	else {
+		return buf;
+	}
 }
 
 template <typename T>
 struct RingBuffer {
 	std::vector<T> buffer;
-	size_t readPos = 0;
-	size_t writePos = 0;
+	uint64 readPos = 0;
+	uint64 writePos = 0;
 
-	RingBuffer(size_t size) : buffer(size + 1) {
+	RingBuffer(uint64 size) : buffer(size + 1) {
 	}
 	void clear() {
 		readPos = 0;
 		writePos = 0;
 	}
-	size_t size() {
+	uint64 size() {
 		if (writePos >= readPos) {
 			return writePos - readPos;
 		}
@@ -113,9 +110,9 @@ struct RingBuffer {
 			return buffer.size() - readPos + writePos;
 		}
 	}
-	T& operator[](size_t index) {
+	T& operator[](uint64 index) {
 		assert(index < size());
-		size_t readIndex = readPos + index;
+		uint64 readIndex = readPos + index;
 		if (readIndex < buffer.size()) {
 			return buffer[readIndex];
 		}
@@ -168,13 +165,14 @@ struct Window {
 		int windowH = static_cast<int>(screenH * 0.9f);
 		int windowX = static_cast<int>((screenW - windowW) * 0.5f);
 		int windowY = static_cast<int>((screenH - windowH) * 0.5f);
-		DWORD window_style = WS_OVERLAPPEDWINDOW;
-		char window_title[128] = {};
-		snprintf(window_title, sizeof(window_title), "YARR %d x %d", windowW, windowH);
-		HWND windowHandle = CreateWindowExA(0, windowClass.lpszClassName, window_title, window_style, windowX, windowY, windowW, windowH, nullptr, nullptr, instanceHandle, nullptr);
+		DWORD windowStyle = WS_OVERLAPPEDWINDOW;
+		char windowTitle[128] = {};
+		snprintf(windowTitle, sizeof(windowTitle), "YARR %d x %d", windowW, windowH);
+		HWND windowHandle = CreateWindowExA(0, windowClass.lpszClassName, windowTitle, windowStyle, windowX, windowY, windowW, windowH, nullptr, nullptr, instanceHandle, nullptr);
 		if (!windowHandle) {
 			throw Exception("CreateWindowExA error:" + getErrorStr());
 		}
+		SetWindowPos(windowHandle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE); // set window to be always on top
 
 		RAWINPUTDEVICE rawInputDevice;
 		rawInputDevice.usUsagePage = 0x01;
@@ -223,6 +221,16 @@ struct Window {
 		ClipCursor(nullptr);
 	}
 };
+
+static std::filesystem::path exePath = [] {
+	wchar_t buf[512];
+	DWORD n = GetModuleFileNameW(nullptr, buf, static_cast<DWORD>(countof(buf)));
+	if (n >= countof(buf)) {
+		throw Exception("GetModuleFileNameA error:" + getErrorStr());
+	}
+	std::filesystem::path path(buf);
+	return path.parent_path();
+}();
 
 void setCurrentDirToExeDir() {
 	wchar_t buf[512];
@@ -310,7 +318,7 @@ struct Token {
 
 struct Parser {
 	std::vector<char> fileData;
-	size_t filePos = 0;
+	uint64 filePos = 0;
 
 	Parser(const std::filesystem::path& filePath) : fileData(readFile(filePath)) {
 	}
@@ -319,7 +327,7 @@ struct Parser {
 			token.type = Token::EndOfFile;
 			return;
 		}
-		while (isspace(static_cast<unsigned char>(fileData[filePos])) || fileData[filePos] == ':' || fileData[filePos] == '[' || fileData[filePos] == ']' || fileData[filePos] == ',') {
+		while (isspace(static_cast<uint8>(fileData[filePos])) || fileData[filePos] == ':' || fileData[filePos] == '[' || fileData[filePos] == ']' || fileData[filePos] == ',') {
 			filePos += 1;
 			if (filePos >= fileData.size()) {
 				token.type = Token::EndOfFile;
@@ -332,7 +340,7 @@ struct Parser {
 				throw Exception("Parser::getToken error: cannot parse string, reached end of file before encountering second \"");
 			}
 			const char* ptr = fileData.data() + filePos;
-			size_t len = 0;
+			uint64 len = 0;
 			while (fileData[filePos] != '"') {
 				if (fileData[filePos] == '\n') {
 					throw Exception("Parser::getToken error: cannot parse string, reached newline before encountering second \"");
@@ -347,22 +355,22 @@ struct Parser {
 			token.type = Token::String;
 			token.str = { ptr, len };
 		}
-		else if (isdigit(static_cast<unsigned char>(fileData[filePos])) || fileData[filePos] == '+' || fileData[filePos] == '-' || fileData[filePos] == '.') {
+		else if (isdigit(static_cast<uint8>(fileData[filePos])) || fileData[filePos] == '+' || fileData[filePos] == '-' || fileData[filePos] == '.') {
 			const char* ptr = fileData.data() + filePos;
-			size_t len = 1;
+			uint64 len = 1;
 			filePos += 1;
-			while (filePos < fileData.size() && (isalnum(static_cast<unsigned char>(fileData[filePos])) || fileData[filePos] == '.')) {
+			while (filePos < fileData.size() && (isalnum(static_cast<uint8>(fileData[filePos])) || fileData[filePos] == '.')) {
 				filePos += 1;
 				len += 1;
 			}
 			token.type = Token::Number;
 			token.str = { ptr, len };
 		}
-		else if (isalpha(static_cast<unsigned char>(fileData[filePos]))) {
+		else if (isalpha(static_cast<uint8>(fileData[filePos]))) {
 			const char* ptr = fileData.data() + filePos;
-			size_t len = 1;
+			uint64 len = 1;
 			filePos += 1;
-			while (filePos < fileData.size() && (isalnum(static_cast<unsigned char>(fileData[filePos])) || fileData[filePos] == '-' || fileData[filePos] == '_')) {
+			while (filePos < fileData.size() && (isalnum(static_cast<uint8>(fileData[filePos])) || fileData[filePos] == '-' || fileData[filePos] == '_')) {
 				filePos += 1;
 				len += 1;
 			}

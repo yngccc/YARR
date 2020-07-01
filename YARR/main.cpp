@@ -10,37 +10,72 @@
 #include "scene.h"
 #include "test.h"
 
+struct Gamepad {
+	XINPUT_STATE prevState = {};
+	XINPUT_STATE state = {};
+
+	void updateState() {
+		prevState = state;
+		DWORD error = XInputGetState(0, &state);
+		if (error != ERROR_SUCCESS) {
+			state = {};
+		}
+	}
+	bool buttonDown(WORD button) {
+		bool down = state.Gamepad.wButtons & button;
+		return down;
+	}
+	bool buttonPressed(WORD button) {
+		bool prevDown = prevState.Gamepad.wButtons & button;
+		bool down = state.Gamepad.wButtons & button;
+		return !prevDown && down;
+	}
+	bool buttonReleased(WORD button) {
+		bool prevDown = prevState.Gamepad.wButtons & button;
+		bool down = state.Gamepad.wButtons & button;
+		return prevDown && !down;
+	}
+	uint8 leftTrigger() {
+		return state.Gamepad.bLeftTrigger;
+	}
+	uint8 rightTrigger() {
+		return state.Gamepad.bRightTrigger;
+	}
+};
+
 static bool quit = false;
 static double frameTime = 0;
 static Window window;
 static DX12Context dx12;
 static std::vector<Scene> scenes = {};
-static size_t currentSceneIndex = 0;
-const char* settingsFilePath = "settings.ini";
+static uint64 currentSceneIndex = 0;
+static Gamepad gamepad;
+static const char* settingsFilePath = "settings.ini";
 
 void imGuiInit() {
 	ImGui::CreateContext();
-	ImGui::StyleColorsDark();
-	ImGui::GetIO().KeyMap[ImGuiKey_Tab] = VK_TAB;
-	ImGui::GetIO().KeyMap[ImGuiKey_LeftArrow] = VK_LEFT;
-	ImGui::GetIO().KeyMap[ImGuiKey_RightArrow] = VK_RIGHT;
-	ImGui::GetIO().KeyMap[ImGuiKey_UpArrow] = VK_UP;
-	ImGui::GetIO().KeyMap[ImGuiKey_DownArrow] = VK_DOWN;
-	ImGui::GetIO().KeyMap[ImGuiKey_PageUp] = VK_PRIOR;
-	ImGui::GetIO().KeyMap[ImGuiKey_PageDown] = VK_NEXT;
-	ImGui::GetIO().KeyMap[ImGuiKey_Home] = VK_HOME;
-	ImGui::GetIO().KeyMap[ImGuiKey_End] = VK_END;
-	ImGui::GetIO().KeyMap[ImGuiKey_Backspace] = VK_BACK;
-	ImGui::GetIO().KeyMap[ImGuiKey_Enter] = VK_RETURN;
-	ImGui::GetIO().KeyMap[ImGuiKey_Escape] = VK_ESCAPE;
-	ImGui::GetIO().KeyMap[ImGuiKey_A] = 'A';
-	ImGui::GetIO().KeyMap[ImGuiKey_C] = 'C';
-	ImGui::GetIO().KeyMap[ImGuiKey_V] = 'V';
-	ImGui::GetIO().KeyMap[ImGuiKey_X] = 'X';
-	ImGui::GetIO().KeyMap[ImGuiKey_Y] = 'Y';
-	ImGui::GetIO().KeyMap[ImGuiKey_Z] = 'Z';
-	ImGui::GetIO().IniFilename = "imgui.ini";
-	ImGui::GetIO().FontGlobalScale = 1.5f;
+	ImGuiIO& io = ImGui::GetIO();
+	io.KeyMap[ImGuiKey_Tab] = VK_TAB;
+	io.KeyMap[ImGuiKey_LeftArrow] = VK_LEFT;
+	io.KeyMap[ImGuiKey_RightArrow] = VK_RIGHT;
+	io.KeyMap[ImGuiKey_UpArrow] = VK_UP;
+	io.KeyMap[ImGuiKey_DownArrow] = VK_DOWN;
+	io.KeyMap[ImGuiKey_PageUp] = VK_PRIOR;
+	io.KeyMap[ImGuiKey_PageDown] = VK_NEXT;
+	io.KeyMap[ImGuiKey_Home] = VK_HOME;
+	io.KeyMap[ImGuiKey_End] = VK_END;
+	io.KeyMap[ImGuiKey_Backspace] = VK_BACK;
+	io.KeyMap[ImGuiKey_Enter] = VK_RETURN;
+	io.KeyMap[ImGuiKey_Escape] = VK_ESCAPE;
+	io.KeyMap[ImGuiKey_A] = 'A';
+	io.KeyMap[ImGuiKey_C] = 'C';
+	io.KeyMap[ImGuiKey_V] = 'V';
+	io.KeyMap[ImGuiKey_X] = 'X';
+	io.KeyMap[ImGuiKey_Y] = 'Y';
+	io.KeyMap[ImGuiKey_Z] = 'Z';
+	io.IniFilename = "imgui.ini";
+	io.FontGlobalScale = 1.5f;
+	io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 }
 
 LRESULT processWindowMsg(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
@@ -86,7 +121,7 @@ LRESULT processWindowMsg(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 	} break;
 	case WM_CHAR:
 	case WM_SYSCHAR: {
-		ImGui::GetIO().AddInputCharacter(static_cast<unsigned>(wparam));
+		ImGui::GetIO().AddInputCharacter(static_cast<uint>(wparam));
 	} break;
 	case WM_MOUSEMOVE: {
 		window.mouseX = GET_X_LPARAM(lparam);
@@ -126,29 +161,6 @@ LRESULT processWindowMsg(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 	return result;
 }
 
-void processGamepad() {
-	struct Gamepad {
-		XINPUT_STATE states[2];
-	};
-	static Gamepad gamepads[XUSER_MAX_COUNT];
-	static int index = 0;
-	for (DWORD i = 0; i < XUSER_MAX_COUNT; i += 1) {
-		XINPUT_STATE& state = gamepads[i].states[index];
-		DWORD error = XInputGetState(i, &state);
-		if (error == ERROR_SUCCESS) {
-			XINPUT_STATE& previousState = gamepads[i].states[(index + 1) % 2];
-			if (state.dwPacketNumber == previousState.dwPacketNumber) {
-			}
-			else {
-			}
-		}
-		else {
-			gamepads[i].states[index] = {};
-		}
-	}
-	index = (index + 1) % 2;
-}
-
 void updateCamera() {
 	if (currentSceneIndex >= scenes.size()) {
 		return;
@@ -180,8 +192,8 @@ void updateCamera() {
 	if (!ImGui::GetIO().WantCaptureMouse) {
 		if (ImGui::IsMouseDragging(0)) {
 			ImVec2 mouseDelta = ImGui::GetIO().MouseDelta / ImVec2(static_cast<float>(window.width), static_cast<float>(window.height));
-			float yawDelta = -mouseDelta.x * 10;
-			float pitchDelta = mouseDelta.y * 10;
+			float yawDelta = -mouseDelta.x * 5;
+			float pitchDelta = -mouseDelta.y * 5;
 			float newPitch = camera.pitchAngle + pitchDelta;
 			if (newPitch >= M_PI / 2.1 || newPitch <= -M_PI / 2.1) {
 				pitchDelta = 0;
@@ -189,14 +201,14 @@ void updateCamera() {
 			else {
 				camera.pitchAngle = newPitch;
 			}
-			DirectX::XMVECTOR v = DirectX::XMVectorSubtract(camera.position, camera.lookAt);
+			DirectX::XMVECTOR v = DirectX::XMVectorSubtract(camera.lookAt, camera.position);
 			DirectX::XMVECTOR axis = DirectX::XMVectorSet(0, 1, 0, 0);
 			DirectX::XMMATRIX m = DirectX::XMMatrixRotationAxis(axis, yawDelta);
 			v = DirectX::XMVector3Transform(v, m);
 			axis = DirectX::XMVector3Cross(v, DirectX::XMVectorSet(0, 1, 0, 0));
 			m = DirectX::XMMatrixRotationAxis(axis, pitchDelta);
 			v = DirectX::XMVector3Transform(v, m);
-			camera.position = DirectX::XMVectorAdd(camera.lookAt, v);
+			camera.lookAt = DirectX::XMVectorAdd(camera.position, v);
 		}
 		else if (ImGui::IsMouseDragging(1)) {
 			ImVec2 mouseDelta = ImGui::GetIO().MouseDelta / ImVec2(static_cast<float>(window.width), static_cast<float>(window.height));
@@ -220,15 +232,17 @@ void updateCamera() {
 void updateFrameTime() {
 	static LARGE_INTEGER perfFrequency;
 	static LARGE_INTEGER perfCounter;
-	static std::once_flag onceFlag1, onceFlag2;
-	std::call_once(onceFlag1, [] { QueryPerformanceFrequency(&perfFrequency); });
-	std::call_once(onceFlag2, [] { QueryPerformanceCounter(&perfCounter); });
+	static int queryPerfCounter = [&] {
+		QueryPerformanceFrequency(&perfFrequency);
+		QueryPerformanceCounter(&perfCounter);
+		return 0;
+	}();
+	static_cast<void>(queryPerfCounter);
 
 	LARGE_INTEGER currentPerfCounter;
 	QueryPerformanceCounter(&currentPerfCounter);
 	LONGLONG ticks = currentPerfCounter.QuadPart - perfCounter.QuadPart;
 	perfCounter = currentPerfCounter;
-
 	frameTime = static_cast<double>(ticks) / static_cast<double>(perfFrequency.QuadPart);
 }
 
@@ -252,10 +266,13 @@ void addScene(const std::string& sceneName, const std::filesystem::path& sceneFi
 		}
 	}
 	if (sceneFilePath.empty()) {
-		scenes.push_back(Scene(name));
+		Scene scene(name);
+		scenes.push_back(std::move(scene));
 	}
 	else {
-		scenes.push_back(Scene(name, sceneFilePath, dx12));
+		Scene scene(name, sceneFilePath, dx12);
+		scene.rebuildTLAS(dx12);
+		scenes.push_back(std::move(scene));
 	}
 	currentSceneIndex = scenes.size() - 1;
 }
@@ -344,14 +361,24 @@ void imguiCommands() {
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
-	if (ImGui::Begin("secondMainBar", nullptr, ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings)) {
+	if (ImGui::Begin("secondMainBar", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings)) {
 		if (ImGui::BeginTabBar("scenesTabbar")) {
+			int sceneTodelete = -1;
 			int sceneIndex = 0;
 			for (auto& scene : scenes) {
-				if (ImGui::BeginTabItem(scene.name.c_str())) {
+				bool open = true;
+				if (ImGui::BeginTabItem(scene.name.c_str(), &open)) {
+					currentSceneIndex = sceneIndex;
 					ImGui::EndTabItem();
 				}
+				if (!open) {
+					sceneTodelete = sceneIndex;
+				}
 				sceneIndex += 1;
+			}
+			if (sceneTodelete != -1) {
+				scenes[sceneTodelete].deleteGPUResources();
+				scenes.erase(scenes.begin() + sceneTodelete);
 			}
 			ImGui::EndTabBar();
 		}
@@ -398,59 +425,76 @@ void imguiCommands() {
 			&metricsWindow.frameTimes, static_cast<int>(metricsWindow.frameTimes.size()), 0, nullptr, 0, 100);
 	}
 	ImGui::End();
-	ImGui::Render();
 }
 
 void graphicsCommands() {
-	dx12.waitAndResetGraphicsCommandList();
-	dx12.clearDescriptorHeaps();
+	dx12.compileShaders();
+	dx12.resetDescriptorHeaps();
+	dx12.resetAndMapConstantBuffer();
 
 	DX12CommandList& cmdList = dx12.graphicsCommandLists[dx12.currentFrame];
-
 	if (currentSceneIndex < scenes.size()) {
 		const Scene& scene = scenes[currentSceneIndex];
-		
-		//DirectX::XMMATRIX viewMat = DirectX::XMMatrixLookAtRH(scene.camera.position, scene.camera.lookAt, scene.camera.up);
-		//DirectX::XMMATRIX projMat = DirectX::XMMatrixPerspectiveFovRH(DirectX::XMConvertToRadians(45), static_cast<float>(window.width) / window.height, 1, 1000);
-		//DirectX::XMMATRIX viewProjMat = viewMat * projMat;
-		//DirectX::XMMATRIX screenToWorldMat = DirectX::XMMatrixTranspose(DirectX::XMMatrixInverse(nullptr, viewProjMat));
+		if (scene.tlasBuffer.buffer) {
+			DirectX::XMMATRIX viewMat = DirectX::XMMatrixLookAtRH(scene.camera.position, scene.camera.lookAt, scene.camera.up);
+			DirectX::XMMATRIX projMat = DirectX::XMMatrixPerspectiveFovRH(DirectX::XMConvertToRadians(45), static_cast<float>(window.width) / window.height, 1, 1000);
+			DirectX::XMMATRIX viewProjMat = viewMat * projMat;
+			struct {
+				DirectX::XMMATRIX screenToWorldMat;
+				DirectX::XMVECTOR cameraPosition;
+			} constants = { DirectX::XMMatrixTranspose(DirectX::XMMatrixInverse(nullptr, viewProjMat)), scene.camera.position };
+			uint64 constantsOffset = dx12.appendConstantBuffer(&constants, sizeof(constants));
 
-		//D3D12_RANGE constantsBufferRange = { 0, 256 };
-		//char* constantsBufferPtr = nullptr;
-		//dx12.constantsBuffer->Map(0, &constantsBufferRange, reinterpret_cast<void**>(&constantsBufferPtr));
-		//memcpy(constantsBufferPtr, &screenToWorldMat, sizeof(screenToWorldMat));
-		//memcpy(constantsBufferPtr + sizeof(screenToWorldMat), &camera.position, sizeof(camera.position));
-		//dx12.constantsBuffer->Unmap(0, nullptr);
+			DX12Descriptor firstDescriptor = dx12.appendDescriptorUAV(dx12.colorTexture.texture);
+			dx12.appendDescriptorCBV(dx12.constantsBuffers[dx12.currentFrame].buffer, constantsOffset, sizeof(constants));
+			dx12.appendDescriptorSRVTLAS(scene.tlasBuffer.buffer);
+			dx12.appendDescriptorSRVStructuredBuffer(scene.instanceInfosBuffer.buffer, 0, scene.instanceCount, sizeof(InstanceInfo));
+			dx12.appendDescriptorSRVStructuredBuffer(scene.triangleInfosBuffer.buffer, 0, scene.triangleCount, sizeof(TriangleInfo));
+			dx12.appendDescriptorSRVStructuredBuffer(scene.materialInfosBuffer.buffer, 0, scene.materialCount, sizeof(MaterialInfo));
+			for (auto& [name, model] : scene.models) {
+				for (auto& texture : model.textures) {
+					dx12.appendDescriptorSRVTexture(texture.texture);
+				}
+			}
+			DX12Buffer& shaderTableBuffer = dx12.rayTracingShaderTableBuffers[dx12.currentFrame];
+			dx12Assert(shaderTableBuffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&shaderTableBuffer.bufferPtr)));
+			memcpy(shaderTableBuffer.bufferPtr, dx12.rayTracingObjectProps->GetShaderIdentifier(L"rayGen"), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
+			memcpy(shaderTableBuffer.bufferPtr + D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES, &firstDescriptor.gpuHandle, 8);
+			memcpy(shaderTableBuffer.bufferPtr + dx12.rayTracingShaderRecordSize, dx12.rayTracingObjectProps->GetShaderIdentifier(L"miss"), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
+			memcpy(shaderTableBuffer.bufferPtr + dx12.rayTracingShaderRecordSize + D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES, &firstDescriptor.gpuHandle, 8);
+			memcpy(shaderTableBuffer.bufferPtr + dx12.rayTracingShaderRecordSize * 2, dx12.rayTracingObjectProps->GetShaderIdentifier(L"hitGroup"), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
+			memcpy(shaderTableBuffer.bufferPtr + dx12.rayTracingShaderRecordSize * 2 + D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES, &firstDescriptor.gpuHandle, 8);
+			shaderTableBuffer.buffer->Unmap(0, nullptr);
+			{
+				PIXScopedEvent(cmdList.list, PIX_COLOR_DEFAULT, "Primary Rays");
 
-		//{ // primary rays
-		//	PIXScopedEvent(cmdList.list, PIX_COLOR_DEFAULT, "Primary Rays");
+				D3D12_RESOURCE_BARRIER barrier = {};
+				barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+				barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+				barrier.Transition.pResource = dx12.colorTexture.texture;
+				barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+				barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+				cmdList.list->ResourceBarrier(1, &barrier);
 
-		//	D3D12_RESOURCE_BARRIER barrier = {};
-		//	barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-		//	barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-		//	barrier.Transition.pResource = dx12.colorTexture;
-		//	barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-		//	barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-		//	cmdList.list->ResourceBarrier(1, &barrier);
+				cmdList.list->SetPipelineState1(dx12.rayTracingStateObject);
+				cmdList.list->SetDescriptorHeaps(1, &dx12.cbvSrvUavDescriptorHeaps[dx12.currentFrame].heap);
 
-		//	cmdList.list->SetPipelineState1(dx12RayTracing.sceneStateObject);
-		//	cmdList.list->SetDescriptorHeaps(1, &dx12.cbvSrvUavDescriptorHeap.heap);
+				D3D12_GPU_VIRTUAL_ADDRESS shaderTablePtr = shaderTableBuffer.buffer->GetGPUVirtualAddress();
+				uint64 recordSize = dx12.rayTracingShaderRecordSize;
+				D3D12_DISPATCH_RAYS_DESC dispatchRaysDesc = {};
+				dispatchRaysDesc.Width = window.width;
+				dispatchRaysDesc.Height = window.height;
+				dispatchRaysDesc.Depth = 1;
+				dispatchRaysDesc.RayGenerationShaderRecord = { shaderTablePtr, recordSize };
+				dispatchRaysDesc.MissShaderTable = { shaderTablePtr + recordSize, recordSize, recordSize };
+				dispatchRaysDesc.HitGroupTable = { shaderTablePtr + recordSize * 2, recordSize, recordSize };
+				cmdList.list->DispatchRays(&dispatchRaysDesc);
 
-		//	D3D12_GPU_VIRTUAL_ADDRESS shaderTablePtr = dx12RayTracing.sceneShaderTable->GetGPUVirtualAddress();
-		//	uint64_t shaderRecordSize = dx12RayTracing.sceneShaderRecordSize;
-		//	D3D12_DISPATCH_RAYS_DESC dispatchRaysDesc = {};
-		//	dispatchRaysDesc.Width = dx12.swapChainWidth;
-		//	dispatchRaysDesc.Height = dx12.swapChainHeight;
-		//	dispatchRaysDesc.Depth = 1;
-		//	dispatchRaysDesc.RayGenerationShaderRecord = { shaderTablePtr, shaderRecordSize };
-		//	dispatchRaysDesc.MissShaderTable = { shaderTablePtr + shaderRecordSize, shaderRecordSize, shaderRecordSize };
-		//	dispatchRaysDesc.HitGroupTable = { shaderTablePtr + shaderRecordSize * 2, shaderRecordSize, shaderRecordSize };
-		//	cmdList.list->DispatchRays(&dispatchRaysDesc);
-
-		//	barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-		//	barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-		//	cmdList.list->ResourceBarrier(1, &barrier);
-		//}
+				barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+				barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+				cmdList.list->ResourceBarrier(1, &barrier);
+			}
+		}
 	}
 	{
 		PIXScopedEvent(cmdList.list, PIX_COLOR_DEFAULT, "Tone Map to Swap Chain and UI");
@@ -464,66 +508,63 @@ void graphicsCommands() {
 		swapChainImageBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
 		cmdList.list->ResourceBarrier(1, &swapChainImageBarrier);
 
-		DX12Descriptor swapChainDescriptor = dx12.appendRTV(dx12.swapChainImages[currentSwapChainImageIndex]);
+		DX12Descriptor swapChainDescriptor = dx12.appendDescriptorRTV(dx12.swapChainImages[currentSwapChainImageIndex]);
 		cmdList.list->OMSetRenderTargets(1, &swapChainDescriptor.cpuHandle, false, nullptr);
 		cmdList.list->ClearRenderTargetView(swapChainDescriptor.cpuHandle, DirectX::Colors::Black, 0, nullptr);
 
-		D3D12_VIEWPORT viewport = { 0, 0, static_cast<float>(dx12.swapChainWidth), static_cast<float>(dx12.swapChainHeight), 0, 1 };
-		RECT scissor = { 0, 0, dx12.swapChainWidth, dx12.swapChainHeight };
+		D3D12_VIEWPORT viewport = { 0, 0, static_cast<float>(window.width), static_cast<float>(window.height), 0, 1 };
+		RECT scissor = { 0, 0, window.width, window.height };
 		cmdList.list->RSSetViewports(1, &viewport);
 		cmdList.list->RSSetScissorRects(1, &scissor);
 
 		cmdList.list->SetPipelineState(dx12.swapChainPipelineState);
 		cmdList.list->SetDescriptorHeaps(1, &dx12.cbvSrvUavDescriptorHeaps[dx12.currentFrame].heap);
 		cmdList.list->SetGraphicsRootSignature(dx12.swapChainRootSignature);
-		DX12Descriptor colorTextureDescriptor = dx12.appendSRVTexture(dx12.colorTexture.texture);
+		DX12Descriptor colorTextureDescriptor = dx12.appendDescriptorSRVTexture(dx12.colorTexture.texture);
 		cmdList.list->SetGraphicsRootDescriptorTable(0, colorTextureDescriptor.gpuHandle);
 		cmdList.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 		cmdList.list->DrawInstanced(3, 1, 0, 0);
 
-		ImDrawData* imguiDrawData = ImGui::GetDrawData();
-		DX12Buffer& imguiVertexBuffer = dx12.imguiVertexBuffers[dx12.currentFrame];
-		DX12Buffer& imguiIndexBuffer = dx12.imguiIndexBuffers[dx12.currentFrame];
-		D3D12_RANGE mapBufferRange = { 0, 0 };
-		char* imguiVertexBufferPtr = nullptr;
-		char* imguiIndexBufferPtr = nullptr;
-		dx12Assert(imguiVertexBuffer.buffer->Map(0, &mapBufferRange, reinterpret_cast<void**>(&imguiVertexBufferPtr)));
-		dx12Assert(imguiIndexBuffer.buffer->Map(0, &mapBufferRange, reinterpret_cast<void**>(&imguiIndexBufferPtr)));
-
+		ImGui::Render();
 		cmdList.list->SetPipelineState(dx12.imguiPipelineState);
 		float blendFactor[] = { 0.f, 0.f, 0.f, 0.f };
 		cmdList.list->OMSetBlendFactor(blendFactor);
 		cmdList.list->SetGraphicsRootSignature(dx12.imguiRootSignature);
-		int imguiConstants[2] = { dx12.swapChainWidth, dx12.swapChainHeight };
+		int imguiConstants[2] = { window.width, window.height };
 		cmdList.list->SetGraphicsRoot32BitConstants(0, 2, imguiConstants, 0);
-		DX12Descriptor imguiTextureDescriptor = dx12.appendSRVTexture(dx12.imguiTexture.texture);
+		DX12Descriptor imguiTextureDescriptor = dx12.appendDescriptorSRVTexture(dx12.imguiTexture.texture);
 		cmdList.list->SetGraphicsRootDescriptorTable(1, imguiTextureDescriptor.gpuHandle);
 
-		cmdList.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-		D3D12_VERTEX_BUFFER_VIEW imguiVertexBufferView = { imguiVertexBuffer.buffer->GetGPUVirtualAddress(), static_cast<unsigned>(imguiVertexBuffer.capacity), sizeof(ImDrawVert) };
-		D3D12_INDEX_BUFFER_VIEW imguiIndexBufferView = { imguiIndexBuffer.buffer->GetGPUVirtualAddress(), static_cast<unsigned>(imguiIndexBuffer.capacity), DXGI_FORMAT_R16_UINT };
+		DX12Buffer& imguiVertexBuffer = dx12.imguiVertexBuffers[dx12.currentFrame];
+		DX12Buffer& imguiIndexBuffer = dx12.imguiIndexBuffers[dx12.currentFrame];
+		D3D12_VERTEX_BUFFER_VIEW imguiVertexBufferView = { imguiVertexBuffer.buffer->GetGPUVirtualAddress(), static_cast<uint>(imguiVertexBuffer.capacity), sizeof(ImDrawVert) };
+		D3D12_INDEX_BUFFER_VIEW imguiIndexBufferView = { imguiIndexBuffer.buffer->GetGPUVirtualAddress(), static_cast<uint>(imguiIndexBuffer.capacity), DXGI_FORMAT_R16_UINT };
 		cmdList.list->IASetVertexBuffers(0, 1, &imguiVertexBufferView);
 		cmdList.list->IASetIndexBuffer(&imguiIndexBufferView);
+		cmdList.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-		size_t imguiVertexBufferOffset = 0;
-		size_t imguiIndexBufferOffset = 0;
+		dx12Assert(imguiVertexBuffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&imguiVertexBuffer.bufferPtr)));
+		dx12Assert(imguiIndexBuffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&imguiIndexBuffer.bufferPtr)));
+		uint64 imguiVertexBufferOffset = 0;
+		uint64 imguiIndexBufferOffset = 0;
+		const ImDrawData* imguiDrawData = ImGui::GetDrawData();
 		for (int i = 0; i < imguiDrawData->CmdListsCount; i += 1) {
-			ImDrawList* dlist = imguiDrawData->CmdLists[i];
-			size_t verticesSize = dlist->VtxBuffer.Size * sizeof(ImDrawVert);
-			size_t indicesSize = dlist->IdxBuffer.Size * sizeof(ImDrawIdx);
-			memcpy(imguiVertexBufferPtr + imguiVertexBufferOffset, dlist->VtxBuffer.Data, verticesSize);
-			memcpy(imguiIndexBufferPtr + imguiIndexBufferOffset, dlist->IdxBuffer.Data, indicesSize);
-			size_t vertexIndex = imguiVertexBufferOffset / sizeof(ImDrawVert);
-			size_t indiceIndex = imguiIndexBufferOffset / sizeof(ImDrawIdx);
-			for (int i = 0; i < dlist->CmdBuffer.Size; i += 1) {
-				ImDrawCmd* dcmd = &dlist->CmdBuffer.Data[i];
-				D3D12_RECT scissor = { 
-					static_cast<LONG>(dcmd->ClipRect.x), static_cast<LONG>(dcmd->ClipRect.y), 
-					static_cast<LONG>(dcmd->ClipRect.z), static_cast<LONG>(dcmd->ClipRect.w) 
+			const ImDrawList& dlist = *imguiDrawData->CmdLists[i];
+			uint64 verticesSize = dlist.VtxBuffer.Size * sizeof(ImDrawVert);
+			uint64 indicesSize = dlist.IdxBuffer.Size * sizeof(ImDrawIdx);
+			memcpy(imguiVertexBuffer.bufferPtr + imguiVertexBufferOffset, dlist.VtxBuffer.Data, verticesSize);
+			memcpy(imguiIndexBuffer.bufferPtr + imguiIndexBufferOffset, dlist.IdxBuffer.Data, indicesSize);
+			uint64 vertexIndex = imguiVertexBufferOffset / sizeof(ImDrawVert);
+			uint64 indiceIndex = imguiIndexBufferOffset / sizeof(ImDrawIdx);
+			for (int i = 0; i < dlist.CmdBuffer.Size; i += 1) {
+				const ImDrawCmd& dcmd = dlist.CmdBuffer[i];
+				D3D12_RECT scissor = {
+					static_cast<LONG>(dcmd.ClipRect.x), static_cast<LONG>(dcmd.ClipRect.y),
+					static_cast<LONG>(dcmd.ClipRect.z), static_cast<LONG>(dcmd.ClipRect.w)
 				};
 				cmdList.list->RSSetScissorRects(1, &scissor);
-				cmdList.list->DrawIndexedInstanced(dcmd->ElemCount, 1, static_cast<unsigned>(indiceIndex), static_cast<int>(vertexIndex), 0);
-				indiceIndex += dcmd->ElemCount;
+				cmdList.list->DrawIndexedInstanced(dcmd.ElemCount, 1, static_cast<uint>(indiceIndex), static_cast<int>(vertexIndex), 0);
+				indiceIndex += dcmd.ElemCount;
 			}
 			imguiVertexBufferOffset = imguiVertexBufferOffset + align(verticesSize, sizeof(ImDrawVert));
 			imguiIndexBufferOffset = imguiIndexBufferOffset + align(indicesSize, sizeof(ImDrawIdx));
@@ -538,9 +579,14 @@ void graphicsCommands() {
 		cmdList.list->ResourceBarrier(1, &swapChainImageBarrier);
 	}
 
-	dx12.closeAndExecuteGraphicsCommandList();
+	dx12.unmapConstantBuffer();
+	dx12.closeAndExecuteCommandList(dx12.graphicsCommandLists[dx12.currentFrame]);
 	dx12Assert(dx12.swapChain->Present(0, 0));
 	dx12.currentFrame = (dx12.currentFrame + 1) % dx12.maxFrameInFlight;
+	dx12.totalFrame += 1;
+	if (dx12.totalFrame >= dx12.maxFrameInFlight) {
+		dx12.waitAndResetCommandList(dx12.graphicsCommandLists[dx12.currentFrame]);
+	}
 }
 
 struct SettingInfo {
@@ -588,19 +634,20 @@ struct SettingParser : public Parser {
 };
 
 void saveSettings() {
-	std::string str;
+	std::string settingsFileStr;
 	for (auto& scene : scenes) {
-		str += "Scene: \"" + scene.name + "\" \"" + scene.filePath.string() + "\"\r\n";
+		scene.writeToFile();
+		settingsFileStr += "Scene: \"" + scene.name + "\" \"" + scene.filePath.string() + "\"\r\n";
 	}
 	setCurrentDirToExeDir();
-	writeFile(settingsFilePath, str);
+	writeFile(settingsFilePath, settingsFileStr);
 }
 
 int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nShowCmd) {
 	runTests();
 
-	CoInitialize(nullptr);
 	setCurrentDirToExeDir();
+	CoInitialize(nullptr);
 	imGuiInit();
 
 	window = Window(processWindowMsg);
@@ -622,42 +669,13 @@ int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
 			}
 		}
 	}
-	if (scenes.empty()) {
-		addScene("New Scene", "");
-	}
-	for (auto& scene : scenes) {
-		scene.rebuildTLAS(dx12);
-	}
-
-	//dx12RayTracing.sceneDescriptorTableDescriptorIndex = dx12.createUAV(dx12.colorTexture);
-	//dx12.createCBV(dx12.constantsBuffer, 0, 256);
-	//dx12.createAccelStructSRV(scene.tlasBuffer);
-	//dx12.createStructuredBufferSRV(scene.instanceInfosBuffer, 0, scene.instanceCount, sizeof(InstanceInfo));
-	//dx12.createStructuredBufferSRV(scene.triangleInfosBuffer, 0, scene.triangleCount, sizeof(TriangleInfo));
-	//dx12.createStructuredBufferSRV(scene.materialInfosBuffer, 0, scene.materialCount, sizeof(MaterialInfo));
-	//for (auto& model : scene.models) {
-	//	for (auto& image : model.images) {
-	//		dx12.createTextureSRV(image.image);
-	//	}
-	//}
-
-	//char* shaderRecordPtr = nullptr;
-	//dx12Assert(dx12RayTracing.sceneShaderTable->Map(0, nullptr, reinterpret_cast<void**>(&shaderRecordPtr)));
-	//D3D12_GPU_DESCRIPTOR_HANDLE sceneDescriptorTableDescriptor = dx12.getCbvSrvUavDescriptorGPU(dx12RayTracing.sceneDescriptorTableDescriptorIndex);
-	//memcpy(shaderRecordPtr, dx12RayTracing.sceneStateObjectProps->GetShaderIdentifier(L"rayGen"), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
-	//memcpy(shaderRecordPtr + D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES, &sceneDescriptorTableDescriptor, 8);
-	//memcpy(shaderRecordPtr + dx12RayTracing.sceneShaderRecordSize, dx12RayTracing.sceneStateObjectProps->GetShaderIdentifier(L"miss"), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
-	//memcpy(shaderRecordPtr + dx12RayTracing.sceneShaderRecordSize + D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES, &sceneDescriptorTableDescriptor, 8);
-	//memcpy(shaderRecordPtr + dx12RayTracing.sceneShaderRecordSize * 2, dx12RayTracing.sceneStateObjectProps->GetShaderIdentifier(L"hitGroup"), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
-	//memcpy(shaderRecordPtr + dx12RayTracing.sceneShaderRecordSize * 2 + D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES, &sceneDescriptorTableDescriptor, 8);
-	//dx12RayTracing.sceneShaderTable->Unmap(0, nullptr);
 
 	window.show();
 
 	while (!quit) {
 		updateFrameTime();
 		window.processMessages();
-		processGamepad();
+		gamepad.updateState();
 		imguiCommands();
 		updateCamera();
 		graphicsCommands();

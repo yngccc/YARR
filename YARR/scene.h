@@ -1,7 +1,5 @@
 #pragma once
 
-#include "dx12.h"
-
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "thirdparty/include/stb_image.h"
@@ -15,13 +13,15 @@
 #define TINYOBJLOADER_IMPLEMENTATION
 #include "thirdparty/include/tiny_obj_loader.h"
 
-#define USE_PIX
-#include "pix3.h"
+#include "fbxsdk.h"
+#undef snprintf
+
+#include "dx12.h"
 
 struct ModelVertex {
 	std::array<float, 3> position;
 	std::array<float, 3> normal;
-	std::array<float, 2> texCoords;
+	std::array<float, 2> uv;
 	std::array<float, 3> tangent;
 };
 
@@ -45,15 +45,14 @@ struct ModelNode {
 };
 
 struct ModelMaterial {
-	std::array<float, 4> baseColorFactor;
-	int baseColorTextureIndex;
-	int baseColorTextureSamplerIndex;
-	int normalTextureIndex;
-	int normalTextureSamplerIndex;
-};
-
-struct ModelImage {
-	DX12Texture image;
+	std::array<float, 4> baseColorFactor = {};
+	int baseColorTextureIndex = -1;
+	int baseColorTextureSamplerIndex = -1;
+	int normalTextureIndex = -1;
+	int normalTextureSamplerIndex = -1;
+	std::array<float, 3> emissiveFactor = {};
+	int emissiveTextureIndex = -1;
+	int emissiveTextureSamplerIndex = -1;
 };
 
 struct Model {
@@ -61,7 +60,8 @@ struct Model {
 	std::vector<int> rootNodes;
 	std::vector<ModelMesh> meshes;
 	std::vector<ModelMaterial> materials;
-	std::vector<ModelImage> images;
+	std::vector<DX12Texture> textures;
+	std::filesystem::path filePath;
 };
 
 struct InstanceInfo {
@@ -74,23 +74,29 @@ struct InstanceInfo {
 
 struct TriangleInfo {
 	std::array<std::array<float, 3>, 3> normals;
-	std::array<std::array<float, 2>, 3> texCoords;
+	std::array<std::array<float, 2>, 3> uvs;
 	std::array<std::array<float, 3>, 3> tangents;
 };
 
 struct MaterialInfo {
-	std::array<float, 4> baseColorFactor;
-	int baseColorTextureIndex;
-	int baseColorTextureSamplerIndex;
-	int normalTextureIndex;
-	int normalTextureSamplerIndex;
+	ModelMaterial material;
 };
 
 struct Camera {
-	DirectX::XMVECTOR position = DirectX::XMVectorSet(5, 2, -0.3f, 0);
-	DirectX::XMVECTOR lookAt = DirectX::XMVectorAdd(position, DirectX::XMVectorSet(-1, 0, 0, 0));
+	DirectX::XMVECTOR position = DirectX::XMVectorSet(0, 0, 0, 0);
+	DirectX::XMVECTOR lookAt = DirectX::XMVectorSet(0, 0, 1, 0);
 	DirectX::XMVECTOR up = DirectX::XMVectorSet(0, 1, 0, 0);
 	float pitchAngle = 0;
+};
+
+struct Light {
+	enum Type {
+		DirectionalLight,
+		PointLight,
+		SpotLight
+	};
+	DirectX::XMVECTOR position = DirectX::XMVectorSet(0, 0, 0, 0);
+	DirectX::XMVECTOR direction = DirectX::XMVectorSet(0, 0, 1, 0);
 };
 
 struct SceneInfo {
@@ -129,9 +135,10 @@ struct SceneParser : public Parser {
 				}
 				info.type = SceneInfo::Camera;
 				info.camera.position = DirectX::XMVectorSet(numbers[0], numbers[1], numbers[2], 0);
-				info.camera.lookAt = DirectX::XMVector3Normalize(DirectX::XMVectorSet(numbers[3], numbers[4], numbers[5], 0));
+				info.camera.lookAt = DirectX::XMVectorSet(numbers[3], numbers[4], numbers[5], 0);
 				info.camera.up = DirectX::XMVectorSet(0, 1, 0, 0);
-				info.camera.pitchAngle = DirectX::XMVectorGetX(DirectX::XMVector3AngleBetweenVectors(info.camera.lookAt, DirectX::XMVectorSet(0, 1, 0, 0)));
+				DirectX::XMVECTOR view = DirectX::XMVector3Normalize(DirectX::XMVectorSubtract(info.camera.lookAt, info.camera.position));
+				info.camera.pitchAngle = DirectX::XMVectorGetX(DirectX::XMVector3AngleBetweenVectors(view, DirectX::XMVectorSet(0, 1, 0, 0)));
 				info.camera.pitchAngle = static_cast<float>(M_PI_2) - info.camera.pitchAngle;
 			}
 			else if (token.str == "Model") {
@@ -172,19 +179,19 @@ struct SceneParser : public Parser {
 
 struct Scene {
 	Camera camera;
+	std::vector<Light> lights;
 	std::unordered_map<std::string, Model> models;
 	DX12Buffer tlasBuffer;
 	DX12Buffer instanceInfosBuffer;
 	DX12Buffer triangleInfosBuffer;
 	DX12Buffer materialInfosBuffer;
-	int instanceCount = 0;
-	int triangleCount = 0;
-	int materialCount = 0;
+	uint64 instanceCount = 0;
+	uint64 triangleCount = 0;
+	uint64 materialCount = 0;
 	std::string name;
 	std::filesystem::path filePath;
 
-	Scene(const std::string& sceneName) : name(sceneName) {
-	}
+	Scene(const std::string& sceneName) : name(sceneName) {}
 	Scene(const std::string& sceneName, const std::filesystem::path& sceneFilePath, DX12Context& dx12) : name(sceneName), filePath(sceneFilePath) {
 		setCurrentDirToExeDir();
 		SceneParser parser(sceneFilePath);
@@ -195,7 +202,17 @@ struct Scene {
 				camera = info.camera;
 			}
 			else if (info.type == SceneInfo::Model) {
-				models.insert({ std::string(info.name), createModelFromGLTF(info.path, dx12) });
+				std::filesystem::path path = info.path;
+				std::filesystem::path extension = path.extension();
+				if (extension == ".gltf") {
+					Model model = createModelFromGLTF(path, dx12);
+					models.insert({ std::string(info.name), model });
+				}
+				//else if (extension == ".fbx") {
+				//}
+				else {
+					throw Exception("unknown model file format: " + extension.string() + "\n");
+				}
 			}
 			else if (info.type == SceneInfo::Entity) {
 			}
@@ -207,7 +224,22 @@ struct Scene {
 			}
 		}
 	}
-	
+	void writeToFile() {
+		std::stringstream strStream;
+		strStream
+			<< "Camera: ["
+			<< DirectX::XMVectorGetX(camera.position) << " " << DirectX::XMVectorGetY(camera.position) << " " << DirectX::XMVectorGetZ(camera.position)
+			<< "] ["
+			<< DirectX::XMVectorGetX(camera.lookAt) << " " << DirectX::XMVectorGetY(camera.lookAt) << " " << DirectX::XMVectorGetZ(camera.lookAt)
+			<< "]\n";
+		for (auto& [name, model] : models) {
+			strStream << "Model: \"" << name << "\" " << model.filePath << "\n";
+		}
+		writeFile(filePath, strStream.str());
+	}
+	void deleteGPUResources() {
+		assert(false && "TODO: implement");
+	}
 	Model createModelFromGLTF(const std::filesystem::path& gltfFilePath, DX12Context& dx12) {
 		tinygltf::TinyGLTF gltfLoader;
 		std::string gltfLoadError;
@@ -220,6 +252,7 @@ struct Scene {
 		assert(gltfModel.scenes.size() == 1);
 
 		Model model = {};
+		model.filePath = gltfFilePath;
 		model.nodes.reserve(gltfModel.nodes.size());
 		for (auto& gltfNode : gltfModel.nodes) {
 			DirectX::XMMATRIX transform = DirectX::XMMatrixIdentity();
@@ -253,34 +286,60 @@ struct Scene {
 			ModelMesh modelMesh;
 			modelMesh.name = gltfMesh.name;
 			modelMesh.primitives.reserve(gltfMesh.primitives.size());
+			std::vector<std::array<DX12Buffer, 3>> scratchBuffers;
+			scratchBuffers.reserve(gltfMesh.primitives.size());
 			for (auto& gltfPrimitive : gltfMesh.primitives) {
 				ModelPrimitive modelPrimitive;
 				modelPrimitive.materialIndex = gltfPrimitive.material;
 				assert(gltfPrimitive.material >= 0 && gltfPrimitive.material < gltfModel.materials.size());
 
-				int positionAccessorIndex = gltfPrimitive.attributes.at("POSITION");
-				auto& positionAccessor = gltfModel.accessors[positionAccessorIndex];
+				auto positionAttribute = gltfPrimitive.attributes.find("POSITION");
+				assert(positionAttribute != gltfPrimitive.attributes.end());
+				auto& positionAccessor = gltfModel.accessors[positionAttribute->second];
 				auto& positionBufferView = gltfModel.bufferViews[positionAccessor.bufferView];
 				auto& positionBuffer = gltfModel.buffers[positionBufferView.buffer];
 				unsigned char* positionData = &positionBuffer.data[positionAccessor.byteOffset + positionBufferView.byteOffset];
 				assert(positionAccessor.type == TINYGLTF_TYPE_VEC3 && positionAccessor.componentType == TINYGLTF_COMPONENT_TYPE_FLOAT && (positionBufferView.byteStride == 0 || positionBufferView.byteStride == 12));
 				assert(positionAccessor.count < USHRT_MAX);
 
-				int normalAccessorIndex = gltfPrimitive.attributes.at("NORMAL");
-				auto& normalAccessor = gltfModel.accessors[normalAccessorIndex];
+				auto normalAttribute = gltfPrimitive.attributes.find("NORMAL");
+				assert(normalAttribute != gltfPrimitive.attributes.end());
+				auto& normalAccessor = gltfModel.accessors[normalAttribute->second];
 				auto& normalBufferView = gltfModel.bufferViews[normalAccessor.bufferView];
 				auto& normalBuffer = gltfModel.buffers[normalBufferView.buffer];
 				unsigned char* normalData = &normalBuffer.data[normalAccessor.byteOffset + normalBufferView.byteOffset];
 				assert(normalAccessor.type == TINYGLTF_TYPE_VEC3 && normalAccessor.componentType == TINYGLTF_COMPONENT_TYPE_FLOAT && (normalBufferView.byteStride == 0 || normalBufferView.byteStride == 12));
 				assert(normalAccessor.count == positionAccessor.count);
 
-				int uvAccessorIndex = gltfPrimitive.attributes.at("TEXCOORD_0");
-				auto& uvAccessor = gltfModel.accessors[uvAccessorIndex];
-				auto& uvBufferView = gltfModel.bufferViews[uvAccessor.bufferView];
-				auto& uvBuffer = gltfModel.buffers[uvBufferView.buffer];
-				unsigned char* uvData = &uvBuffer.data[uvAccessor.byteOffset + uvBufferView.byteOffset];
-				assert(uvAccessor.type == TINYGLTF_TYPE_VEC2 && uvAccessor.componentType == TINYGLTF_COMPONENT_TYPE_FLOAT && (uvBufferView.byteStride == 0 || uvBufferView.byteStride == 8));
-				assert(uvAccessor.count == positionAccessor.count);
+				auto uvAttribute = gltfPrimitive.attributes.find("TEXCOORD_0");
+				unsigned char* uvData = nullptr;
+				if (uvAttribute != gltfPrimitive.attributes.end()) {
+					auto& uvAccessor = gltfModel.accessors[uvAttribute->second];
+					auto& uvBufferView = gltfModel.bufferViews[uvAccessor.bufferView];
+					auto& uvBuffer = gltfModel.buffers[uvBufferView.buffer];
+					uvData = &uvBuffer.data[uvAccessor.byteOffset + uvBufferView.byteOffset];
+					assert(uvAccessor.type == TINYGLTF_TYPE_VEC2 && uvAccessor.componentType == TINYGLTF_COMPONENT_TYPE_FLOAT && (uvBufferView.byteStride == 0 || uvBufferView.byteStride == 8));
+					assert(uvAccessor.count == positionAccessor.count);
+				}
+				else {
+					assert(gltfModel.materials[gltfPrimitive.material].pbrMetallicRoughness.baseColorTexture.index < 0);
+					assert(gltfModel.materials[gltfPrimitive.material].normalTexture.index < 0);
+				}
+
+				auto tangentAttrib = gltfPrimitive.attributes.find("TANGENT");
+				unsigned char* tangentData = nullptr;
+				if (tangentAttrib != gltfPrimitive.attributes.end()) {
+					int tangentAccessorIndex = tangentAttrib->second;
+					auto& tangentAccessor = gltfModel.accessors[tangentAccessorIndex];
+					auto& tangentBufferView = gltfModel.bufferViews[tangentAccessor.bufferView];
+					auto& tangentBuffer = gltfModel.buffers[tangentBufferView.buffer];
+					tangentData = &tangentBuffer.data[tangentAccessor.byteOffset + tangentBufferView.byteOffset];
+					assert(tangentAccessor.type == TINYGLTF_TYPE_VEC4 && tangentAccessor.componentType == TINYGLTF_COMPONENT_TYPE_FLOAT && (tangentBufferView.byteStride == 0 || tangentBufferView.byteStride == 16));
+					assert(tangentAccessor.count == positionAccessor.count);
+				}
+				else {
+					assert(gltfModel.materials[gltfPrimitive.material].normalTexture.index < 0);
+				}
 
 				auto& indexAccessor = gltfModel.accessors[gltfPrimitive.indices];
 				auto& indexBufferView = gltfModel.bufferViews[indexAccessor.bufferView];
@@ -301,48 +360,38 @@ struct Scene {
 				assert(gltfPrimitive.mode == TINYGLTF_MODE_TRIANGLES);
 
 				modelPrimitive.vertices.resize(positionAccessor.count);
-				for (size_t i = 0; i < positionAccessor.count; i += 1) {
+				for (uint64 i = 0; i < positionAccessor.count; i += 1) {
 					memcpy(modelPrimitive.vertices[i].position.data(), positionData + i * 12, 12);
 					memcpy(modelPrimitive.vertices[i].normal.data(), normalData + i * 12, 12);
-					memcpy(modelPrimitive.vertices[i].texCoords.data(), uvData + i * 8, 8);
-				}
-				auto tangentAttrib = gltfPrimitive.attributes.find("TANGENT");
-				if (tangentAttrib != gltfPrimitive.attributes.end()) {
-					int tangentAccessorIndex = tangentAttrib->second;
-					auto& tangentAccessor = gltfModel.accessors[tangentAccessorIndex];
-					auto& tangentBufferView = gltfModel.bufferViews[tangentAccessor.bufferView];
-					auto& tangentBuffer = gltfModel.buffers[tangentBufferView.buffer];
-					unsigned char* tangentData = &tangentBuffer.data[tangentAccessor.byteOffset + tangentBufferView.byteOffset];
-					assert(tangentAccessor.type == TINYGLTF_TYPE_VEC4 && tangentAccessor.componentType == TINYGLTF_COMPONENT_TYPE_FLOAT && (tangentBufferView.byteStride == 0 || tangentBufferView.byteStride == 16));
-					assert(tangentAccessor.count == positionAccessor.count);
-					for (size_t i = 0; i < positionAccessor.count; i += 1) {
+					if (uvData) {
+						memcpy(modelPrimitive.vertices[i].uv.data(), uvData + i * 8, 8);
+					}
+					if (tangentData) {
 						memcpy(modelPrimitive.vertices[i].tangent.data(), tangentData + i * 16, 12);
 					}
-				}
-				else {
-					auto& gltfMaterial = gltfModel.materials[gltfPrimitive.material];
-					assert(gltfMaterial.normalTexture.index < 0);
 				}
 				modelPrimitive.indices.resize(indexAccessor.count * modelPrimitive.indexSize);
 				memcpy(modelPrimitive.indices.data(), indexData, indexAccessor.count * modelPrimitive.indexSize);
 
-				DX12Buffer indicesBuffer = dx12.createBuffer(modelPrimitive.indices.size(), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
 				DX12Buffer vertexPositionsBuffer = dx12.createBuffer(modelPrimitive.vertices.size() * 12, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
-				char* indicesBufferPtr = nullptr;
-				dx12Assert(indicesBuffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&indicesBufferPtr)));
-				memcpy(indicesBufferPtr, modelPrimitive.indices.data(), modelPrimitive.indices.size());
-				indicesBuffer.buffer->Unmap(0, nullptr);
+				DX12Buffer indicesBuffer = dx12.createBuffer(modelPrimitive.indices.size(), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
 				char* vertexPositionsBufferPtr = nullptr;
-				vertexPositionsBuffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&vertexPositionsBufferPtr));
+				char* indicesBufferPtr = nullptr;
+				dx12Assert(vertexPositionsBuffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&vertexPositionsBufferPtr)));
+				dx12Assert(indicesBuffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&indicesBufferPtr)));
 				for (auto& vertex : modelPrimitive.vertices) {
 					memcpy(vertexPositionsBufferPtr, vertex.position.data(), 12);
 					vertexPositionsBufferPtr += 12;
 				}
+				memcpy(indicesBufferPtr, modelPrimitive.indices.data(), modelPrimitive.indices.size());
 				vertexPositionsBuffer.buffer->Unmap(0, nullptr);
+				indicesBuffer.buffer->Unmap(0, nullptr);
 
 				D3D12_RAYTRACING_GEOMETRY_DESC meshGeometryDesc = {};
 				meshGeometryDesc.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-				meshGeometryDesc.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_NONE; // D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+				if (gltfModel.materials[gltfPrimitive.material].alphaMode == "OPAQUE") {
+					meshGeometryDesc.Flags |= D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+				}
 				meshGeometryDesc.Triangles.IndexFormat = (modelPrimitive.indexSize == 2) ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT;
 				meshGeometryDesc.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
 				meshGeometryDesc.Triangles.IndexCount = static_cast<UINT>(modelPrimitive.indices.size() / modelPrimitive.indexSize);
@@ -367,35 +416,40 @@ struct Scene {
 				blasDesc.Inputs = blasInput;
 				blasDesc.ScratchAccelerationStructureData = blasScratchBuffer.buffer->GetGPUVirtualAddress();
 
-				dx12.waitAndResetGraphicsCommandList();
 				DX12CommandList& cmdList = dx12.graphicsCommandLists[dx12.currentFrame];
 				cmdList.list->BuildRaytracingAccelerationStructure(&blasDesc, 0, nullptr);
-				dx12.closeAndExecuteGraphicsCommandList();
-				dx12.waitAndResetGraphicsCommandList();
 
 				modelPrimitive.blasBuffer = blasBuffer.buffer;
 
-				blasScratchBuffer.buffer->Release();
-				indicesBuffer.buffer->Release();
-				vertexPositionsBuffer.buffer->Release();
-
+				scratchBuffers.push_back({ vertexPositionsBuffer, indicesBuffer, blasScratchBuffer });
 				modelMesh.primitives.push_back(std::move(modelPrimitive));
+			}
+			dx12.closeAndExecuteCommandList(dx12.graphicsCommandLists[dx12.currentFrame]);
+			dx12.waitAndResetCommandList(dx12.graphicsCommandLists[dx12.currentFrame]);
+			for (auto& buffers : scratchBuffers) {
+				for (auto& buffer : buffers) {
+					buffer.buffer->Release();
+				}
 			}
 			model.meshes.push_back(std::move(modelMesh));
 		}
 		model.materials.reserve(gltfModel.materials.size());
 		for (auto& gltfMaterial : gltfModel.materials) {
-			ModelMaterial material = { {}, -1, -1, -1, -1 };
+			ModelMaterial material;
 			for (int i = 0; i < 4; i += 1) {
 				material.baseColorFactor[i] = static_cast<float>(gltfMaterial.pbrMetallicRoughness.baseColorFactor[i]);
 			}
-			assert(gltfMaterial.pbrMetallicRoughness.baseColorTexture.index >= 0 && gltfMaterial.pbrMetallicRoughness.baseColorTexture.index < gltfModel.textures.size());
-			assert(gltfMaterial.pbrMetallicRoughness.baseColorTexture.texCoord == 0);
-			auto& baseColorTexture = gltfModel.textures[gltfMaterial.pbrMetallicRoughness.baseColorTexture.index];
-			assert(baseColorTexture.source >= 0 && baseColorTexture.source < gltfModel.images.size());
-			assert(baseColorTexture.sampler >= 0 && baseColorTexture.sampler < gltfModel.samplers.size());
-			material.baseColorTextureIndex = baseColorTexture.source;
-			material.baseColorTextureSamplerIndex = baseColorTexture.sampler;
+			for (int i = 0; i < 3; i += 1) {
+				material.emissiveFactor[i] = static_cast<float>(gltfMaterial.emissiveFactor[i]);
+			}
+			if (gltfMaterial.pbrMetallicRoughness.baseColorTexture.index >= 0) {
+				assert(gltfMaterial.pbrMetallicRoughness.baseColorTexture.texCoord == 0);
+				auto& baseColorTexture = gltfModel.textures[gltfMaterial.pbrMetallicRoughness.baseColorTexture.index];
+				assert(baseColorTexture.source >= 0 && baseColorTexture.source < gltfModel.images.size());
+				assert(baseColorTexture.sampler >= 0 && baseColorTexture.sampler < gltfModel.samplers.size());
+				material.baseColorTextureIndex = baseColorTexture.source;
+				material.baseColorTextureSamplerIndex = baseColorTexture.sampler;
+			}
 			if (gltfMaterial.normalTexture.index >= 0) {
 				assert(gltfMaterial.normalTexture.texCoord == 0);
 				assert(gltfMaterial.normalTexture.scale == 1.0);
@@ -405,9 +459,17 @@ struct Scene {
 				material.normalTextureIndex = normalTexture.source;
 				material.normalTextureSamplerIndex = normalTexture.sampler;
 			}
+			if (gltfMaterial.emissiveTexture.index >= 0) {
+				assert(gltfMaterial.emissiveTexture.texCoord == 0);
+				auto& emissiveTexture = gltfModel.textures[gltfMaterial.emissiveTexture.index];
+				assert(emissiveTexture.source >= 0 && emissiveTexture.source < gltfModel.images.size());
+				assert(emissiveTexture.sampler >= 0 && emissiveTexture.sampler < gltfModel.samplers.size());
+				material.emissiveTextureIndex = emissiveTexture.source;
+				material.emissiveTextureSamplerIndex = emissiveTexture.sampler;
+			}
 			model.materials.push_back(material);
 		}
-		model.images.reserve(gltfModel.images.size());
+		model.textures.reserve(gltfModel.images.size());
 		for (auto& gltfImage : gltfModel.images) {
 			DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
 			if (gltfImage.component == 1 && gltfImage.bits == 8 && gltfImage.pixel_type == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE) {
@@ -420,15 +482,15 @@ struct Scene {
 				format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
 			}
 			assert(format != DXGI_FORMAT_UNKNOWN);
-			DX12Texture image = dx12.createTexture(gltfImage.width, gltfImage.height, 1, 1, format, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
+			DX12Texture texture = dx12.createTexture(gltfImage.width, gltfImage.height, 1, 1, format, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
 			DX12TextureCopy textureCopy = {
-				image, reinterpret_cast<char*>(gltfImage.image.data()), gltfImage.image.size(),
+				texture, reinterpret_cast<char*>(gltfImage.image.data()), gltfImage.image.size(),
 				D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
 			};
-			dx12.copyTextures({ textureCopy });
+			dx12.copyTextures(&textureCopy, 1);
 			std::wstring name(gltfImage.uri.begin(), gltfImage.uri.end());
-			image.texture->SetName(name.c_str());
-			model.images.push_back(ModelImage{ image });
+			texture.texture->SetName(name.c_str());
+			model.textures.push_back(texture);
 		}
 		return model;
 	}
@@ -463,23 +525,23 @@ struct Scene {
 			for (auto& mesh : model.meshes) {
 				std::vector<PrimitiveInfo> meshPrimitiveInfos;
 				for (auto& primitive : mesh.primitives) {
-					int triangleCount = static_cast<int>(primitive.indices.size() / primitive.indexSize) / 3;
-					PrimitiveInfo primitiveInfo = { static_cast<int>(triangleInfos.size()), triangleCount, static_cast<int>(materialInfos.size()) };
+					uint64 triangleCount = primitive.indices.size() / primitive.indexSize / 3;
+					PrimitiveInfo primitiveInfo = { static_cast<int>(triangleInfos.size()), static_cast<int>(triangleCount), static_cast<int>(materialInfos.size()) };
 					meshPrimitiveInfos.push_back(primitiveInfo);
-					for (int indexIndex = 0; indexIndex < primitive.indices.size() / primitive.indexSize; indexIndex += 3) {
+					for (uint64 indexIndex = 0; indexIndex < primitive.indices.size() / primitive.indexSize; indexIndex += 3) {
 						TriangleInfo triangleInfo = {};
-						for (int triangleIndex = 0; triangleIndex < 3; triangleIndex += 1) {
+						for (uint64 triangleIndex = 0; triangleIndex < 3; triangleIndex += 1) {
 							char* indexPtr = &primitive.indices[(indexIndex + triangleIndex) * primitive.indexSize];
-							unsigned int index = 0;
+							uint index = 0;
 							if (primitive.indexSize == 2) {
-								index = *reinterpret_cast<unsigned short*>(indexPtr);
+								index = *reinterpret_cast<uint16*>(indexPtr);
 							}
 							else {
-								index = *reinterpret_cast<unsigned int*>(indexPtr);
+								index = *reinterpret_cast<uint*>(indexPtr);
 							}
 							ModelVertex& vertex = primitive.vertices[index];
 							triangleInfo.normals[triangleIndex] = vertex.normal;
-							triangleInfo.texCoords[triangleIndex] = vertex.texCoords;
+							triangleInfo.uvs[triangleIndex] = vertex.uv;
 							triangleInfo.tangents[triangleIndex] = vertex.tangent;
 						}
 						triangleInfos.push_back(triangleInfo);
@@ -489,14 +551,22 @@ struct Scene {
 			}
 			primitiveInfos.push_back(std::move(modelPrimitiveInfos));
 			for (auto& material : model.materials) {
-				MaterialInfo materialInfo = { material.baseColorFactor, imageCount + material.baseColorTextureIndex, material.baseColorTextureSamplerIndex, -1, -1 };
+				MaterialInfo materialInfo = { material };
+				if (material.baseColorTextureIndex >= 0) {
+					materialInfo.material.baseColorTextureIndex = imageCount + material.baseColorTextureIndex;
+					materialInfo.material.baseColorTextureSamplerIndex = material.baseColorTextureSamplerIndex;
+				}
 				if (material.normalTextureIndex >= 0) {
-					materialInfo.normalTextureIndex = imageCount + material.normalTextureIndex;
-					materialInfo.normalTextureSamplerIndex = material.normalTextureSamplerIndex;
+					materialInfo.material.normalTextureIndex = imageCount + material.normalTextureIndex;
+					materialInfo.material.normalTextureSamplerIndex = material.normalTextureSamplerIndex;
+				}
+				if (material.emissiveTextureIndex >= 0) {
+					materialInfo.material.emissiveTextureIndex = imageCount + material.emissiveTextureIndex;
+					materialInfo.material.emissiveTextureSamplerIndex = material.emissiveTextureSamplerIndex;
 				}
 				materialInfos.push_back(materialInfo);
 			}
-			imageCount += static_cast<int>(model.images.size());
+			imageCount += static_cast<int>(model.textures.size());
 		}
 		std::vector<D3D12_RAYTRACING_INSTANCE_DESC> tlasInstanceDescs;
 		std::vector<InstanceInfo> instanceInfos;
@@ -536,9 +606,9 @@ struct Scene {
 			modelIndex += 1;
 		}
 
-		instanceCount = static_cast<int>(instanceInfos.size());
-		triangleCount = static_cast<int>(triangleInfos.size());
-		materialCount = static_cast<int>(materialInfos.size());
+		instanceCount = instanceInfos.size();
+		triangleCount = triangleInfos.size();
+		materialCount = materialInfos.size();
 		instanceInfosBuffer = dx12.createBuffer(instanceInfos.size() * sizeof(InstanceInfo), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
 		triangleInfosBuffer = dx12.createBuffer(triangleInfos.size() * sizeof(TriangleInfo), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
 		materialInfosBuffer = dx12.createBuffer(materialInfos.size() * sizeof(MaterialInfo), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
@@ -581,11 +651,10 @@ struct Scene {
 		tlasDesc.Inputs = tlasInputs;
 		tlasDesc.ScratchAccelerationStructureData = tlasScratchBuffer.buffer->GetGPUVirtualAddress();
 
-		dx12.waitAndResetGraphicsCommandList();
-		ID3D12GraphicsCommandList4* cmdList = dx12.graphicsCommandLists[dx12.currentFrame].list;
-		cmdList->BuildRaytracingAccelerationStructure(&tlasDesc, 0, nullptr);
-		dx12.closeAndExecuteGraphicsCommandList();
-		dx12.waitAndResetGraphicsCommandList();
+		DX12CommandList& cmdList = dx12.graphicsCommandLists[dx12.currentFrame];
+		cmdList.list->BuildRaytracingAccelerationStructure(&tlasDesc, 0, nullptr);
+		dx12.closeAndExecuteCommandList(dx12.graphicsCommandLists[dx12.currentFrame]);
+		dx12.waitAndResetCommandList(dx12.graphicsCommandLists[dx12.currentFrame]);
 
 		tlasInstanceDescsBuffer.buffer->Release();
 	}

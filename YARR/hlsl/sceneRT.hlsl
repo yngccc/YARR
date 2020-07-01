@@ -20,6 +20,9 @@ struct MaterialInfo {
 	int baseColorTectureSamplerIndex;
 	int normalTextureIndex;
 	int normalTectureSamplerIndex;
+	float3 emissiveFactor;
+	int emissiveTextureIndex;
+	int emissiveTectureSamplerIndex;
 };
 
 RWTexture2D<float4> colorTexture : register(u0);
@@ -36,6 +39,7 @@ sampler sampler0 : register(s0);
 
 struct RayPayload {
 	float4 color;
+	int bounce;
 };
 
 void getEyeRay(uint2 dimensions, uint2 pixelIndex, out float3 origin, out float3 direction) {
@@ -64,7 +68,9 @@ void rayGen() {
 	rayDesc.Direction = direction;
 	rayDesc.TMin = 0;
 	rayDesc.TMax = 5000;
-	RayPayload rayPayload = { float4(0, 0, 0, 0) };
+	RayPayload rayPayload;
+	rayPayload.color = float4(0, 0, 0, 0);
+	rayPayload.bounce = 0;
 	TraceRay(scene, RAY_FLAG_NONE, 0xff, 0, 0, 0, rayDesc, rayPayload);
 	colorTexture[pixelIndex.xy] = rayPayload.color;
 }
@@ -82,11 +88,14 @@ void closestHit(inout RayPayload rayPayload, in BuiltInTriangleIntersectionAttri
 	InstanceInfo instanceInfo = instanceInfos[InstanceIndex()];
 	TriangleInfo triangleInfo = triangleInfos[instanceInfo.triangleOffset + PrimitiveIndex()];
 	MaterialInfo materialInfo = materialInfos[instanceInfo.materialIndex];
-	float2 texCoord = barycentricsInterpolate(triangleAttribs.barycentrics, triangleInfo.texCoords);
-	Texture2D baseColorTexture = textures[materialInfo.baseColorTextureIndex];
-	float4 color = baseColorTexture.SampleLevel(sampler0, texCoord, 0);
-	color *= materialInfo.baseColorFactor;
+	float4 color = materialInfo.baseColorFactor;
+	color.rgb += materialInfo.emissiveFactor;
 	float3 normal = barycentricsInterpolate(triangleAttribs.barycentrics, triangleInfo.normals);
+	float2 texCoord = barycentricsInterpolate(triangleAttribs.barycentrics, triangleInfo.texCoords);
+	if (materialInfo.baseColorTextureIndex >= 0) {
+		Texture2D baseColorTexture = textures[materialInfo.baseColorTextureIndex];
+		color = baseColorTexture.SampleLevel(sampler0, texCoord, 0) * materialInfo.baseColorFactor;
+	}
 	if (materialInfo.normalTextureIndex >= 0) {
 		float3 tangent = barycentricsInterpolate(triangleAttribs.barycentrics, triangleInfo.tangents);
 		float3 bitangent = cross(normal, tangent);
@@ -95,20 +104,21 @@ void closestHit(inout RayPayload rayPayload, in BuiltInTriangleIntersectionAttri
 		float3 n = normalTexture.SampleLevel(sampler0, texCoord, 0).xyz;
 		normal = mul(tbn, n);
 	}
-	float n = max(0, dot(normal, normalize(float3(1, 1, 1))));
-	rayPayload.color = color * (0.0 + n);
+	rayPayload.color = color;
 };
 
 [shader("anyhit")]
 void anyHit(inout RayPayload rayPayload, in BuiltInTriangleIntersectionAttributes triangleAttribs) {
 	InstanceInfo instanceInfo = instanceInfos[InstanceIndex()];
-	TriangleInfo triangleInfo = triangleInfos[instanceInfo.triangleOffset + PrimitiveIndex()];
 	MaterialInfo materialInfo = materialInfos[instanceInfo.materialIndex];
-	float2 texCoord = barycentricsInterpolate(triangleAttribs.barycentrics, triangleInfo.texCoords);
-	Texture2D baseColorTexture = textures[materialInfo.baseColorTextureIndex];
-	float4 color = baseColorTexture.SampleLevel(sampler0, texCoord, 0);
-	if (color.w < 1) {
-		IgnoreHit();
+	if (materialInfo.baseColorTextureIndex > 0) {
+		TriangleInfo triangleInfo = triangleInfos[instanceInfo.triangleOffset + PrimitiveIndex()];
+		float2 texCoord = barycentricsInterpolate(triangleAttribs.barycentrics, triangleInfo.texCoords);
+		Texture2D baseColorTexture = textures[materialInfo.baseColorTextureIndex];
+		float4 color = baseColorTexture.SampleLevel(sampler0, texCoord, 0);
+		if (color.w < 1) {
+			IgnoreHit();
+		}
 	}
 }
 

@@ -1,42 +1,42 @@
 #include "miscs.h"
 
-static size_t _testErrorCount_ = 0;
-static size_t _testCount_ = 0;
-static size_t _caseErrorCount_ = 0;
-static size_t _caseCount_ = 0;
-static size_t _assertErrorCount_ = 0;
-static size_t _assertCount_ = 0;
+static uint64 _testErrorCount_ = 0;
+static uint64 _testCount_ = 0;
+static uint64 _caseErrorCount_ = 0;
+static uint64 _caseCount_ = 0;
+static uint64 _assertErrorCount_ = 0;
+static uint64 _assertCount_ = 0;
 
 void TEST(const char* name) {
 	_testCount_ += 1;
 	_caseErrorCount_ = 0;
 	_caseCount_ = 0;
-	debugPrintf("%s:\n", name);
+	OutputDebugStringA((name + "\n"s).c_str());
 }
 
 void TESTEND() {
 	if (_caseErrorCount_ > 0) {
 		_testErrorCount_ += 1;
 	}
-	debugPrintf("\n");
+	OutputDebugStringA("\n");
 }
 
 void CASE(const char* name) {
 	_caseCount_ += 1;
 	_assertErrorCount_ = 0;
 	_assertCount_ = 0;
-	debugPrintf("  %s: ", name);
+	OutputDebugStringA(("  "s + name + ": ").c_str());
 }
 
 void CASEEND() {
 	if (_assertErrorCount_ > 0) {
 		_caseErrorCount_ += 1;
-		debugPrintf("failed");
+		OutputDebugStringA("failed");
 	}
 	else {
-		debugPrintf("passed");
+		OutputDebugStringA("passed");
 	}
-	debugPrintf(" [%d/%d]\n", _assertCount_ - _assertErrorCount_, _assertCount_);
+	OutputDebugStringA((" [" + std::to_string(_assertCount_ - _assertErrorCount_) + "/" + std::to_string(_assertCount_) + "]\n").c_str());
 }
 
 void ASSERT(bool cond) {
@@ -47,7 +47,7 @@ void ASSERT(bool cond) {
 }
 
 void REPORT() {
-	debugPrintf("Total of %d/%d tests passed\n\n\n", _testCount_ - _testErrorCount_, _testCount_);
+	OutputDebugStringA(("Total of " + std::to_string(_testCount_ - _testErrorCount_) + "/" + std::to_string(_testCount_) + " tests passed\n\n\n").c_str());
 }
 
 void runTests() {

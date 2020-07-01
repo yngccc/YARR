@@ -12,15 +12,17 @@
 #include <dxgidebug.h>
 #include <d3dcompiler.h>
 
+#define USE_PIX
+#include "pix3.h"
+
 #define dx12Assert(dx12Call) \
 { \
-	HRESULT hr = dx12Call; \
-	if (hr != S_OK) { \
-		char error[256]; \
-		FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM, nullptr, hr, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), error, static_cast<DWORD>(sizeof(error)), nullptr); \
-		char msg[512]; \
-		snprintf(msg, sizeof(msg), "D3D12 error: %s\n%s", error, #dx12Call); \
-        throw Exception(msg); \
+	HRESULT dx12CallResult = dx12Call; \
+	if (dx12CallResult != S_OK) { \
+		char error[256] = "D3D12 error: "; \
+		FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, dx12CallResult, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), error + 13, 256 - 13, nullptr); \
+		OutputDebugStringA(error); \
+        assert(false && #dx12Call); \
 	} \
 }
 
@@ -28,7 +30,7 @@ struct DX12CommandList {
 	ID3D12CommandAllocator* allocator;
 	ID3D12GraphicsCommandList4* list;
 	ID3D12Fence* fence;
-	uint64_t fenceValue;
+	uint64 fenceValue;
 	HANDLE fenceEvent;
 };
 
@@ -41,15 +43,16 @@ struct DX12DescriptorHeap {
 	ID3D12DescriptorHeap* heap;
 	D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle;
 	D3D12_GPU_DESCRIPTOR_HANDLE gpuHandle;
-	size_t size;
-	size_t capacity;
-	size_t descriptorSize;
+	uint64 size;
+	uint64 capacity;
+	uint64 descriptorSize;
 };
 
 struct DX12Buffer {
 	ID3D12Resource* buffer = nullptr;
-	size_t size = 0;
-	size_t capacity = 0;
+	char* bufferPtr = nullptr;
+	uint64 size = 0;
+	uint64 capacity = 0;
 };
 
 struct DX12Texture {
@@ -59,7 +62,7 @@ struct DX12Texture {
 struct DX12TextureCopy {
 	DX12Texture dstTexture;
 	char* srcTexture;
-	size_t srcTextureSize;
+	uint64 srcTextureSize;
 	D3D12_RESOURCE_STATES beforeResourceState;
 	D3D12_RESOURCE_STATES afterResourceState;
 };
@@ -71,10 +74,11 @@ struct DX12Context {
 	ID3D12Debug2* debugController2;
 	IDXGIDebug* dxgiDebug;
 	IDXGIInfoQueue* dxgiInfoQueue;
-	IDXGIFactory5* dxgiFactory;
+	IDXGIFactory6* dxgiFactory;
 
-	static const int maxFrameInFlight = 2;
-	int currentFrame = 0;
+	static const uint64 maxFrameInFlight = 2;
+	uint64 totalFrame = 0;
+	uint64 currentFrame = 0;
 
 	ID3D12CommandQueue* graphicsCommandQueue;
 	ID3D12Fence* graphicsCommandQueueFence;
@@ -90,27 +94,25 @@ struct DX12Context {
 
 	IDXGISwapChain4* swapChain;
 	ID3D12Resource* swapChainImages[3];
-	int swapChainWidth;
-	int swapChainHeight;
 
 	DX12Buffer constantsBuffers[maxFrameInFlight];
-	DX12Texture colorTexture;
-	DX12Texture depthTexture;
-
 	DX12Buffer imguiVertexBuffers[maxFrameInFlight];
 	DX12Buffer imguiIndexBuffers[maxFrameInFlight];
+
+	DX12Texture colorTexture;
+	DX12Texture depthTexture;
 	DX12Texture imguiTexture;
 
-	ID3D12RootSignature* swapChainRootSignature;
-	ID3D12PipelineState* swapChainPipelineState;
+	ID3D12RootSignature* swapChainRootSignature = nullptr;
+	ID3D12PipelineState* swapChainPipelineState = nullptr;
 
-	ID3D12RootSignature* imguiRootSignature;
-	ID3D12PipelineState* imguiPipelineState;
+	ID3D12RootSignature* imguiRootSignature = nullptr;
+	ID3D12PipelineState* imguiPipelineState = nullptr;
 
-	ID3D12StateObject* sceneStateObject;
-	ID3D12StateObjectProperties* sceneStateObjectProps;
-	DX12Buffer sceneShaderTable;
-	size_t sceneShaderRecordSize;
+	ID3D12StateObject* rayTracingStateObject = nullptr;
+	ID3D12StateObjectProperties* rayTracingObjectProps = nullptr;
+	DX12Buffer rayTracingShaderTableBuffers[maxFrameInFlight];
+	uint64 rayTracingShaderRecordSize;
 
 	DX12Context() = default;
 	DX12Context(const Window& window) {
@@ -128,26 +130,13 @@ struct DX12Context {
 			dx12Assert(dxgiInfoQueue->SetBreakOnSeverity(DXGI_DEBUG_ALL, DXGI_INFO_QUEUE_MESSAGE_SEVERITY_ERROR, true));
 			dx12Assert(dxgiInfoQueue->SetBreakOnSeverity(DXGI_DEBUG_ALL, DXGI_INFO_QUEUE_MESSAGE_SEVERITY_WARNING, true));
 
-			UINT factoryFlags = DXGI_CREATE_FACTORY_DEBUG;
-			dx12Assert(CreateDXGIFactory2(factoryFlags, IID_PPV_ARGS(&dxgiFactory)));
-
-			for (int i = 0; dxgiFactory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; i += 1) {
-				DXGI_ADAPTER_DESC1 adapter_desc;
-				adapter->GetDesc1(&adapter_desc);
-				if (!(adapter_desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) {
-					if (SUCCEEDED(D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_12_0, _uuidof(ID3D12Device), nullptr))) {
-						break;
-					}
-				}
-			}
+			dx12Assert(CreateDXGIFactory2(DXGI_CREATE_FACTORY_DEBUG, IID_PPV_ARGS(&dxgiFactory)));
+			dx12Assert(dxgiFactory->EnumAdapterByGpuPreference(0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&adapter)));
 			dx12Assert(D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&device)));
-		}
-		{
+
 			D3D12_FEATURE_DATA_D3D12_OPTIONS5 features = {};
 			dx12Assert(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &features, sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS5)));
-			if (features.RaytracingTier < D3D12_RAYTRACING_TIER_1_0) {
-				throw Exception("D3D12 error: RaytracingTier < D3D12_RAYTRACING_TIER_1_0");
-			}
+			assert(features.RaytracingTier >= D3D12_RAYTRACING_TIER_1_0 && "D3D12 error: RaytracingTier < D3D12_RAYTRACING_TIER_1_0");
 
 			//D3D12_FEATURE_DATA_D3D12_OPTIONS7 featureData = {};
 			//device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS7, &featureData, sizeof(featureData));
@@ -162,10 +151,8 @@ struct DX12Context {
 			queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
 			dx12Assert(device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&graphicsCommandQueue)));
 			dx12Assert(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&graphicsCommandQueueFence)));
-			graphicsCommandQueueFenceEvent = CreateEventA(nullptr, FALSE, FALSE, nullptr);
-			if (!graphicsCommandQueueFenceEvent) {
-				throw Exception("D3D12 error: CreateEvent failed to create graphicsCommandQueueFenceEvent");
-			}
+			graphicsCommandQueueFenceEvent = CreateEventA(nullptr, false, false, nullptr);
+			assert(graphicsCommandQueueFenceEvent && "D3D12 error: CreateEvent failed to create graphicsCommandQueueFenceEvent");
 
 			queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
 			queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -174,24 +161,20 @@ struct DX12Context {
 			for (auto& list : graphicsCommandLists) {
 				dx12Assert(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&list.allocator)));
 				dx12Assert(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, list.allocator, nullptr, IID_PPV_ARGS(&list.list)));
-				list.list->Close();
+
 				dx12Assert(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&list.fence)));
 				list.fenceValue = 0;
-				list.fenceEvent = CreateEventA(nullptr, FALSE, TRUE, nullptr);
-				if (!list.fenceEvent) {
-					throw Exception("D3D12 error: CreateEvent failed to create graphicsCommandList");
-				}
+				list.fenceEvent = CreateEventA(nullptr, false, false, nullptr);
+				assert(list.fenceEvent && "D3D12 error: CreateEvent failed to create graphicsCommandList");
 			}
 
 			dx12Assert(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&copyCommandList.allocator)));
 			dx12Assert(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, copyCommandList.allocator, nullptr, IID_PPV_ARGS(&copyCommandList.list)));
-			copyCommandList.list->Close();
+
 			dx12Assert(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&copyCommandList.fence)));
 			copyCommandList.fenceValue = 0;
-			copyCommandList.fenceEvent = CreateEventA(nullptr, FALSE, TRUE, nullptr);
-			if (!copyCommandList.fenceEvent) {
-				throw Exception("D3D12 error: CreateEvent failed to create graphicsCommandList");
-			}
+			copyCommandList.fenceEvent = CreateEventA(nullptr, false, false, nullptr);
+			assert(copyCommandList.fenceEvent && "D3D12 error: CreateEvent failed to create graphicsCommandList");
 		}
 		{
 			DXGI_SWAP_CHAIN_DESC1 swapChainDesc = {};
@@ -207,8 +190,6 @@ struct DX12Context {
 				swapChain->GetBuffer(i, IID_PPV_ARGS(&swapChainImages[i]));
 				swapChainImages[i]->SetName(L"swapChain");
 			}
-			swapChainWidth = window.width;
-			swapChainHeight = window.height;
 		}
 		for (int i = 0; i < maxFrameInFlight; i += 1) {
 			D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
@@ -245,81 +226,126 @@ struct DX12Context {
 		for (int i = 0; i < maxFrameInFlight; i += 1) {
 			constantsBuffers[i] = createBuffer(megabytes(32), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
 			constantsBuffers[i].buffer->SetName(L"constantsBuffer");
+			imguiVertexBuffers[i] = createBuffer(megabytes(1), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+			imguiVertexBuffers[i].buffer->SetName(L"imguiVertexBuffer");
+			imguiIndexBuffers[i] = createBuffer(megabytes(1), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+			imguiIndexBuffers[i].buffer->SetName(L"imguiIndexBuffer");
 		}
 		{
 			colorTexture = createTexture(window.width, window.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 			colorTexture.texture->SetName(L"colorTexture");
 			depthTexture = createTexture(window.width, window.height, 1, 1, DXGI_FORMAT_D32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_DEPTH_WRITE);
 			depthTexture.texture->SetName(L"depthTexture");
-		}
-		for (int i = 0; i < maxFrameInFlight; i += 1) {
-			imguiVertexBuffers[i] = createBuffer(megabytes(1), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
-			imguiIndexBuffers[i] = createBuffer(megabytes(1), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
-			imguiVertexBuffers[i].buffer->SetName(L"imguiVertexBuffer");
-			imguiIndexBuffers[i].buffer->SetName(L"imguiIndexBuffer");
-		}
-		{
-			char* imguiTextureData = nullptr;
-			int imguiTextureWidth, imguiTextureHeight;
-			ImFont* imFont = ImGui::GetIO().Fonts->AddFontDefault();
+
+			ImGuiIO& io = ImGui::GetIO();
+			ImFont* imFont = io.Fonts->AddFontDefault();
 			assert(imFont);
-			ImGui::GetIO().Fonts->GetTexDataAsRGBA32(reinterpret_cast<unsigned char**>(&imguiTextureData), &imguiTextureWidth, &imguiTextureHeight);
+			char* imguiTextureData;
+			int imguiTextureWidth;
+			int imguiTextureHeight;
+			io.Fonts->GetTexDataAsRGBA32(reinterpret_cast<uint8**>(&imguiTextureData), &imguiTextureWidth, &imguiTextureHeight);
 			imguiTexture = createTexture(imguiTextureWidth, imguiTextureHeight, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
 			imguiTexture.texture->SetName(L"imguiTexture");
-			DX12TextureCopy textureCopy = { imguiTexture, imguiTextureData, imguiTextureWidth * imguiTextureHeight * 4ul, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE };
-			copyTextures({ textureCopy });
+			DX12TextureCopy textureCopy = { imguiTexture, imguiTextureData,  4ull * imguiTextureWidth * imguiTextureHeight, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE };
+			copyTextures(&textureCopy, 1);
 		}
-		{
-			{
-				std::vector<char> vsBytecode = readFile("swapChainVS.cso");
-				std::vector<char> psBytecode = readFile("swapChainPS.cso");
-				dx12Assert(device->CreateRootSignature(0, psBytecode.data(), psBytecode.size(), IID_PPV_ARGS(&swapChainRootSignature)));
-				D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
-				psoDesc.VS = { vsBytecode.data(), vsBytecode.size() };
-				psoDesc.PS = { psBytecode.data(), psBytecode.size() };
-				psoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-				psoDesc.SampleMask = UINT_MAX;
-				psoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-				psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
-				psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-				psoDesc.NumRenderTargets = 1;
-				psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-				psoDesc.SampleDesc.Count = 1;
-				dx12Assert(device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&swapChainPipelineState)));
-			}
-			{
-				std::vector<char> vsBytecode = readFile("imguiVS.cso");
-				std::vector<char> psBytecode = readFile("imguiPS.cso");
-				dx12Assert(device->CreateRootSignature(0, psBytecode.data(), psBytecode.size(), IID_PPV_ARGS(&imguiRootSignature)));
-				D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
-				psoDesc.VS = { vsBytecode.data(), vsBytecode.size() };
-				psoDesc.PS = { psBytecode.data(), psBytecode.size() };
-				psoDesc.BlendState.RenderTarget[0].BlendEnable = true;
-				psoDesc.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
-				psoDesc.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
-				psoDesc.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
-				psoDesc.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
-				psoDesc.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
-				psoDesc.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
-				psoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-				psoDesc.SampleMask = UINT_MAX;
-				psoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-				psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-				psoDesc.RasterizerState.DepthClipEnable = true;
-				D3D12_INPUT_ELEMENT_DESC inputElemDesc[] = {
-					{"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-					{"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 8, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-					{"COLOR", 0, DXGI_FORMAT_R8G8B8A8_UNORM, 0, 16, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0}
-				};
-				psoDesc.InputLayout = { inputElemDesc, countof<UINT>(inputElemDesc) };
-				psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-				psoDesc.NumRenderTargets = 1;
-				psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-				psoDesc.SampleDesc.Count = 1;
-				dx12Assert(device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&imguiPipelineState)));
-			}
+		compileShaders(true);
+	}
+	void compileShaders(bool forceCompile = false) {
+		static auto swapChainVSWriteTime = std::filesystem::last_write_time("swapChainVS.cso");
+		static auto swapChainPSWriteTime = std::filesystem::last_write_time("swapChainPS.cso");
+		static auto imguiVSWriteTime = std::filesystem::last_write_time("imguiVS.cso");
+		static auto imguiPSWriteTime = std::filesystem::last_write_time("imguiPS.cso");
+		static auto sceneRTWriteTime = std::filesystem::last_write_time("sceneRT.cso");
+
+		auto curSwapChainVSWriteTime = std::filesystem::last_write_time("swapChainVS.cso");
+		auto curSwapChainPSWriteTime = std::filesystem::last_write_time("swapChainPS.cso");
+		auto curImguiVSWriteTime = std::filesystem::last_write_time("imguiVS.cso");
+		auto curImguiPSWriteTime = std::filesystem::last_write_time("imguiPS.cso");
+		auto curSceneRTWriteTime = std::filesystem::last_write_time("sceneRT.cso");
+
+		bool compileSwapChainShaders = curSwapChainVSWriteTime > swapChainVSWriteTime || curSwapChainPSWriteTime > swapChainPSWriteTime;
+		bool compileImguiShaders = curImguiVSWriteTime > imguiVSWriteTime || curImguiPSWriteTime > imguiPSWriteTime;
+		bool compileSceneRTShader = curSceneRTWriteTime > sceneRTWriteTime;
+		
+		if (forceCompile || compileSwapChainShaders || compileImguiShaders || compileSceneRTShader) {
+			drainGraphicsCommandQueue();
 		}
-		{
+		if (forceCompile || compileSwapChainShaders) {
+			if (swapChainRootSignature) {
+				swapChainRootSignature->Release();
+			}
+			if (swapChainPipelineState) {
+				swapChainPipelineState->Release();
+			}
+			swapChainVSWriteTime = curSwapChainVSWriteTime;
+			swapChainPSWriteTime = curSwapChainPSWriteTime;
+
+			std::vector<char> vsBytecode = readFile("swapChainVS.cso");
+			std::vector<char> psBytecode = readFile("swapChainPS.cso");
+			dx12Assert(device->CreateRootSignature(0, psBytecode.data(), psBytecode.size(), IID_PPV_ARGS(&swapChainRootSignature)));
+			D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
+			psoDesc.VS = { vsBytecode.data(), vsBytecode.size() };
+			psoDesc.PS = { psBytecode.data(), psBytecode.size() };
+			psoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+			psoDesc.SampleMask = UINT_MAX;
+			psoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+			psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+			psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+			psoDesc.NumRenderTargets = 1;
+			psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+			psoDesc.SampleDesc.Count = 1;
+			dx12Assert(device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&swapChainPipelineState)));
+		}
+		if (forceCompile || compileImguiShaders) {
+			if (imguiRootSignature) {
+				imguiRootSignature->Release();
+			}
+			if (imguiPipelineState) {
+				imguiPipelineState->Release();
+			}
+			imguiVSWriteTime = curImguiVSWriteTime;
+			imguiPSWriteTime = curImguiPSWriteTime;
+
+			std::vector<char> vsBytecode = readFile("imguiVS.cso");
+			std::vector<char> psBytecode = readFile("imguiPS.cso");
+			dx12Assert(device->CreateRootSignature(0, psBytecode.data(), psBytecode.size(), IID_PPV_ARGS(&imguiRootSignature)));
+			D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
+			psoDesc.VS = { vsBytecode.data(), vsBytecode.size() };
+			psoDesc.PS = { psBytecode.data(), psBytecode.size() };
+			psoDesc.BlendState.RenderTarget[0].BlendEnable = true;
+			psoDesc.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
+			psoDesc.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+			psoDesc.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+			psoDesc.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+			psoDesc.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
+			psoDesc.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+			psoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+			psoDesc.SampleMask = UINT_MAX;
+			psoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+			psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+			psoDesc.RasterizerState.DepthClipEnable = true;
+			D3D12_INPUT_ELEMENT_DESC inputElemDesc[] = {
+				{"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+				{"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 8, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+				{"COLOR", 0, DXGI_FORMAT_R8G8B8A8_UNORM, 0, 16, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0}
+			};
+			psoDesc.InputLayout = { inputElemDesc, countof<UINT>(inputElemDesc) };
+			psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+			psoDesc.NumRenderTargets = 1;
+			psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+			psoDesc.SampleDesc.Count = 1;
+			dx12Assert(device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&imguiPipelineState)));
+		}
+		if (forceCompile || compileSceneRTShader) {
+			if (rayTracingStateObject) {
+				rayTracingStateObject->Release();
+			}
+			if (rayTracingObjectProps) {
+				rayTracingObjectProps->Release();
+			}
+			sceneRTWriteTime = curSceneRTWriteTime;
+
 			D3D12_STATE_SUBOBJECT stateSubobjects[6] = {};
 
 			std::vector<char> bytecode = readFile("sceneRT.cso");
@@ -390,7 +416,7 @@ struct DX12Context {
 			stateSubobjects[4] = { D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_PIPELINE_CONFIG, &pipelineConfig };
 
 			D3D12_RAYTRACING_SHADER_CONFIG shaderConfig = {};
-			shaderConfig.MaxPayloadSizeInBytes = 16;
+			shaderConfig.MaxPayloadSizeInBytes = 32;
 			shaderConfig.MaxAttributeSizeInBytes = 8;
 			stateSubobjects[5] = { D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_SHADER_CONFIG, &shaderConfig };
 
@@ -398,15 +424,17 @@ struct DX12Context {
 			stateObjectDesc.Type = D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE;
 			stateObjectDesc.NumSubobjects = countof<UINT>(stateSubobjects);
 			stateObjectDesc.pSubobjects = stateSubobjects;
-			dx12Assert(device->CreateStateObject(&stateObjectDesc, IID_PPV_ARGS(&sceneStateObject)));
-			dx12Assert(sceneStateObject->QueryInterface(IID_PPV_ARGS(&sceneStateObjectProps)));
+			dx12Assert(device->CreateStateObject(&stateObjectDesc, IID_PPV_ARGS(&rayTracingStateObject)));
+			dx12Assert(rayTracingStateObject->QueryInterface(IID_PPV_ARGS(&rayTracingObjectProps)));
 
-			sceneShaderRecordSize = align(D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES + 32, D3D12_RAYTRACING_SHADER_RECORD_BYTE_ALIGNMENT);
-			sceneShaderTable = createBuffer(3 * sceneShaderRecordSize, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
-			sceneShaderTable.buffer->SetName(L"rtSceneShaderTable");
+			rayTracingShaderRecordSize = align(D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES + 32, D3D12_RAYTRACING_SHADER_RECORD_BYTE_ALIGNMENT);
+			for (int i = 0; i < maxFrameInFlight; i += 1) {
+				rayTracingShaderTableBuffers[i] = createBuffer(3 * rayTracingShaderRecordSize, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+				rayTracingShaderTableBuffers[i].buffer->SetName(L"rtSceneShaderTable");
+			}
 		}
 	}
-	DX12Buffer createBuffer(size_t capacity, D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_FLAGS resourceFlags, D3D12_RESOURCE_STATES resourceState) const {
+	DX12Buffer createBuffer(uint64 capacity, D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_FLAGS resourceFlags, D3D12_RESOURCE_STATES resourceState) const {
 		D3D12_HEAP_PROPERTIES heap_prop = {};
 		heap_prop.Type = heapType;
 		D3D12_RESOURCE_DESC resource_desc = {};
@@ -419,11 +447,12 @@ struct DX12Context {
 		resource_desc.SampleDesc.Count = 1;
 		resource_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
 		resource_desc.Flags = resourceFlags;
-		ID3D12Resource* buffer = nullptr;
-		dx12Assert(device->CreateCommittedResource(&heap_prop, D3D12_HEAP_FLAG_NONE, &resource_desc, resourceState, nullptr, IID_PPV_ARGS(&buffer)));
-		return DX12Buffer{ buffer, 0, capacity };
+		DX12Buffer buffer;
+		buffer.capacity = capacity;
+		dx12Assert(device->CreateCommittedResource(&heap_prop, D3D12_HEAP_FLAG_NONE, &resource_desc, resourceState, nullptr, IID_PPV_ARGS(&buffer.buffer)));
+		return buffer;
 	}
-	DX12Texture createTexture(unsigned width, unsigned height, unsigned arraySize, unsigned mips, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resourceFlags, D3D12_RESOURCE_STATES resourceState) const {
+	DX12Texture createTexture(uint width, uint height, uint arraySize, uint mips, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resourceFlags, D3D12_RESOURCE_STATES resourceState) const {
 		D3D12_HEAP_PROPERTIES heapProps = {};
 		heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
 
@@ -442,7 +471,7 @@ struct DX12Context {
 
 		ID3D12Resource* texture = nullptr;
 		if (resourceFlags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET || resourceFlags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) {
-			D3D12_CLEAR_VALUE clearValue = { format, {0, 0, 0, 1} };
+			D3D12_CLEAR_VALUE clearValue = { format };
 			dx12Assert(device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, resourceState, &clearValue, IID_PPV_ARGS(&texture)));
 		}
 		else {
@@ -450,32 +479,10 @@ struct DX12Context {
 		}
 		return DX12Texture{ texture };
 	}
-	void copyTextures(const std::vector<DX12TextureCopy>& textureCopies) {
-		DWORD waitResult = WaitForSingleObject(copyCommandList.fenceEvent, INFINITE);
-		if (waitResult != WAIT_OBJECT_0) {
-			if (waitResult == WAIT_ABANDONED) {
-				throw Exception("WaitForSIngleObject error: WAIT_ABANDONED");
-			}
-			else if (waitResult == WAIT_TIMEOUT) {
-				throw Exception("WaitForSIngleObject error: WAIT_TIMEOUT");
-			}
-			else if (waitResult == WAIT_FAILED) {
-				throw Exception("WaitForSIngleObject error: " + getErrorStr());
-			}
-			else {
-				throw Exception("WaitForSIngleObject error: unknown error");
-			}
-		}
-		dx12Assert(copyCommandList.allocator->Reset());
-		dx12Assert(copyCommandList.list->Reset(copyCommandList.allocator, nullptr));
-
+	void copyTextures(DX12TextureCopy* textureCopies, uint64 textureCopiesCount) {
 		static std::vector<DX12Buffer> stageBuffers;
-		for (auto& buffer : stageBuffers) {
-			buffer.buffer->Release();
-		}
-		stageBuffers.resize(0);
-
-		for (auto& textureCopy : textureCopies) {
+		for (uint64 i = 0; i < textureCopiesCount; i += 1) {
+			DX12TextureCopy& textureCopy = textureCopies[i];
 			D3D12_RESOURCE_DESC textureDesc = textureCopy.dstTexture.texture->GetDesc();
 			int subresourceCount = static_cast<int>(textureDesc.MipLevels * textureDesc.DepthOrArraySize);
 			std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints;
@@ -484,7 +491,7 @@ struct DX12Context {
 			footprints.resize(subresourceCount);
 			rowCounts.resize(subresourceCount);
 			rowSizes.resize(subresourceCount);
-			size_t totalSize = 0;
+			uint64 totalSize = 0;
 			device->GetCopyableFootprints(&textureDesc, 0, subresourceCount, 0, footprints.data(), rowCounts.data(), rowSizes.data(), &totalSize);
 			assert(totalSize >= textureCopy.srcTextureSize);
 
@@ -533,162 +540,114 @@ struct DX12Context {
 			barrier.Transition.StateAfter = textureCopy.afterResourceState;
 			copyCommandList.list->ResourceBarrier(1, &barrier);
 		}
-
-		dx12Assert(copyCommandList.list->Close());
-		copyCommandQueue->ExecuteCommandLists(1, reinterpret_cast<ID3D12CommandList**>(&copyCommandList.list));
-		copyCommandList.fenceValue += 1;
-		dx12Assert(copyCommandQueue->Signal(copyCommandList.fence, copyCommandList.fenceValue));
-		dx12Assert(copyCommandList.fence->SetEventOnCompletion(copyCommandList.fenceValue, copyCommandList.fenceEvent));
-	}
-	//int createRTV(ID3D12Resource* resource, int indexToUpdate = -1) {
-	//	if (indexToUpdate < 0) {
-	//		indexToUpdate = rtvDescriptorHeap.size;
-	//		rtvDescriptorHeap.size += 1;
-	//	}
-	//	device->CreateRenderTargetView(resource, nullptr, getRTVDescriptorCPU(indexToUpdate));
-	//	return indexToUpdate;
-	//}
-	//int createDSV(ID3D12Resource* resource, int indexToUpdate = -1) {
-	//	if (indexToUpdate < 0) {
-	//		indexToUpdate = dsvDescriptorHeap.size;
-	//		dsvDescriptorHeap.size += 1;
-	//	}
-	//	device->CreateDepthStencilView(resource, nullptr, getDSVDescriptorCPU(indexToUpdate));
-	//	return indexToUpdate;
-	//}
-	//int createCBV(ID3D12Resource* resource, int offset, int size, int indexToUpdate = -1) {
-	//	if (indexToUpdate < 0) {
-	//		indexToUpdate = cbvSrvUavDescriptorHeap.size;
-	//		cbvSrvUavDescriptorHeap.size += 1;
-	//	}
-	//	D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = { resource->GetGPUVirtualAddress() + offset, static_cast<UINT>(size) };
-	//	device->CreateConstantBufferView(&cbvDesc, getCbvSrvUavDescriptorCPU(indexToUpdate));
-	//	return indexToUpdate;
-	//}
-	//int createTextureSRV(ID3D12Resource* resource, int indexToUpdate = -1) {
-	//	if (indexToUpdate < 0) {
-	//		indexToUpdate = cbvSrvUavDescriptorHeap.size;
-	//		cbvSrvUavDescriptorHeap.size += 1;
-	//	}
-	//	// D3D12_SHADER_RESOURCE_VIEW_DESC desc;
-	//	device->CreateShaderResourceView(resource, nullptr, getCbvSrvUavDescriptorCPU(indexToUpdate));
-	//	return indexToUpdate;
-	//}
-	//int createStructuredBufferSRV(ID3D12Resource* resource, int offset, int size, int stride, int indexToUpdate = -1) {
-	//	if (indexToUpdate < 0) {
-	//		indexToUpdate = cbvSrvUavDescriptorHeap.size;
-	//		cbvSrvUavDescriptorHeap.size += 1;
-	//	}
-	//	D3D12_SHADER_RESOURCE_VIEW_DESC desc = {};
-	//	desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-	//	desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-	//	desc.Buffer.FirstElement = offset;
-	//	desc.Buffer.NumElements = size;
-	//	desc.Buffer.StructureByteStride = stride;
-	//	device->CreateShaderResourceView(resource, &desc, getCbvSrvUavDescriptorCPU(indexToUpdate));
-	//	return indexToUpdate;
-	//}
-	//int createUAV(ID3D12Resource* resource, int indexToUpdate = -1) {
-	//	if (indexToUpdate < 0) {
-	//		indexToUpdate = cbvSrvUavDescriptorHeap.size;
-	//		cbvSrvUavDescriptorHeap.size += 1;
-	//	}
-	//	device->CreateUnorderedAccessView(resource, nullptr, nullptr, getCbvSrvUavDescriptorCPU(indexToUpdate));
-	//	return indexToUpdate;
-	//}
-	//int createAccelStructSRV(ID3D12Resource* resource, int indexToUpdate = -1) {
-	//	if (indexToUpdate < 0) {
-	//		indexToUpdate = cbvSrvUavDescriptorHeap.size;
-	//		cbvSrvUavDescriptorHeap.size += 1;
-	//	}
-	//	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-	//	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
-	//	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-	//	srvDesc.RaytracingAccelerationStructure.Location = resource->GetGPUVirtualAddress();
-	//	device->CreateShaderResourceView(nullptr, &srvDesc, getCbvSrvUavDescriptorCPU(indexToUpdate));
-	//	return indexToUpdate;
-	//}
-	DX12Descriptor appendRTV(ID3D12Resource* resource) {
-		DX12DescriptorHeap& heap = rtvDescriptorHeaps[currentFrame];
-		DX12Descriptor descriptor = { heap.cpuHandle.ptr + heap.descriptorSize * heap.size, heap.gpuHandle.ptr + heap.descriptorSize * heap.size };
-		device->CreateRenderTargetView(resource, nullptr, descriptor.cpuHandle);
-		heap.size += 1;
-		if (heap.size >= heap.capacity) {
-			throw Exception("D3D12 error: appendRTV exceeded heap capacity");
+		closeAndExecuteCommandList(copyCommandList);
+		waitAndResetCommandList(copyCommandList);
+		for (auto& buffer : stageBuffers) {
+			buffer.buffer->Release();
 		}
-		return descriptor;
+		stageBuffers.resize(0);
 	}
-	DX12Descriptor appendCBV(ID3D12Resource* resource, unsigned offset, unsigned size) {
-		DX12DescriptorHeap& heap = cbvSrvUavDescriptorHeaps[currentFrame];
-		DX12Descriptor descriptor = { heap.cpuHandle.ptr + heap.descriptorSize * heap.size, heap.gpuHandle.ptr + heap.descriptorSize * heap.size };
-		D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = { resource->GetGPUVirtualAddress() + offset, size };
-		device->CreateConstantBufferView(&cbvDesc, descriptor.cpuHandle);
-		heap.size += 1;
-		if (heap.size >= heap.capacity) {
-			throw Exception("D3D12 error: appendCBV exceeded heap capacity");
-		}
-		return descriptor;
+	uint64 appendConstantBuffer(void* data, uint64 dataSize) {
+		DX12Buffer& buffer = constantsBuffers[currentFrame];
+		uint64 alignedSize = align(buffer.size, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+		assert(alignedSize + dataSize < buffer.capacity);
+		memcpy(buffer.bufferPtr + alignedSize, data, dataSize);
+		buffer.size = alignedSize + dataSize;
+		return alignedSize;
 	}
-	DX12Descriptor appendUAV(ID3D12Resource* resource) {
-		DX12DescriptorHeap& heap = cbvSrvUavDescriptorHeaps[currentFrame];
-		DX12Descriptor descriptor = { heap.cpuHandle.ptr + heap.descriptorSize * heap.size, heap.gpuHandle.ptr + heap.descriptorSize * heap.size };
-		device->CreateUnorderedAccessView(resource, nullptr, nullptr, descriptor.cpuHandle);
-		heap.size += 1;
-		if (heap.size >= heap.capacity) {
-			throw Exception("D3D12 error: appendUAV exceeded heap capacity");
-		}
-		return descriptor;
+	void resetAndMapConstantBuffer() {
+		DX12Buffer& buffer = constantsBuffers[currentFrame];
+		buffer.size = 0;
+		dx12Assert(buffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&constantsBuffers[currentFrame].bufferPtr)));
 	}
-	DX12Descriptor appendSRVTexture(ID3D12Resource* resource) {
-		DX12DescriptorHeap& heap = cbvSrvUavDescriptorHeaps[currentFrame];
-		DX12Descriptor descriptor = { heap.cpuHandle.ptr + heap.descriptorSize * heap.size, heap.gpuHandle.ptr + heap.descriptorSize * heap.size };
-		device->CreateShaderResourceView(resource, nullptr, descriptor.cpuHandle);
-		heap.size += 1;
-		if (heap.size >= heap.capacity) {
-			throw Exception("D3D12 error: appendSRVTexture exceeded heap capacity");
-		}
-		return descriptor;
+	void unmapConstantBuffer() {
+		constantsBuffers[currentFrame].buffer->Unmap(0, nullptr);
 	}
-	void clearDescriptorHeaps() {
+	void resetDescriptorHeaps() {
 		rtvDescriptorHeaps[currentFrame].size = 0;
 		dsvDescriptorHeaps[currentFrame].size = 0;
 		cbvSrvUavDescriptorHeaps[currentFrame].size = 0;
 	}
-	void waitAndResetGraphicsCommandList() {
-		DX12CommandList& cmdList = graphicsCommandLists[currentFrame];
-		DWORD waitResult = WaitForSingleObject(cmdList.fenceEvent, INFINITE);
-		if (waitResult != WAIT_OBJECT_0) {
-			if (waitResult == WAIT_ABANDONED) {
-				throw Exception("WaitForSIngleObject error: WAIT_ABANDONED");
-			}
-			else if (waitResult == WAIT_TIMEOUT) {
-				throw Exception("WaitForSIngleObject error: WAIT_TIMEOUT");
-			}
-			else if (waitResult == WAIT_FAILED) {
-				throw Exception("WaitForSIngleObject error: " + getErrorStr());
-			}
-			else {
-				throw Exception("WaitForSIngleObject error: unknown error");
-			}
-		}
-		dx12Assert(cmdList.allocator->Reset());
-		dx12Assert(cmdList.list->Reset(cmdList.allocator, nullptr));
+	DX12Descriptor appendDescriptorRTV(ID3D12Resource* resource) {
+		DX12DescriptorHeap& heap = rtvDescriptorHeaps[currentFrame];
+		assert(heap.size < heap.capacity && "D3D12 error: appendRTV exceeded heap capacity");
+		DX12Descriptor descriptor = { {heap.cpuHandle.ptr + heap.descriptorSize * heap.size}, {heap.gpuHandle.ptr + heap.descriptorSize * heap.size} };
+		device->CreateRenderTargetView(resource, nullptr, descriptor.cpuHandle);
+		heap.size += 1;
+		return descriptor;
 	}
-	void closeAndExecuteGraphicsCommandList() {
-		DX12CommandList& cmdList = graphicsCommandLists[currentFrame];
+	DX12Descriptor appendDescriptorCBV(ID3D12Resource* resource, uint64 offset, uint64 size) {
+		DX12DescriptorHeap& heap = cbvSrvUavDescriptorHeaps[currentFrame];
+		assert(heap.size < heap.capacity && "D3D12 error: appendCBV exceeded heap capacity");
+		DX12Descriptor descriptor = { {heap.cpuHandle.ptr + heap.descriptorSize * heap.size}, {heap.gpuHandle.ptr + heap.descriptorSize * heap.size} };
+		uint64 alignedSize = align(size, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+		D3D12_CONSTANT_BUFFER_VIEW_DESC desc = { resource->GetGPUVirtualAddress() + offset, static_cast<uint>(alignedSize) };
+		device->CreateConstantBufferView(&desc, descriptor.cpuHandle);
+		heap.size += 1;
+		return descriptor;
+	}
+	DX12Descriptor appendDescriptorUAV(ID3D12Resource* resource) {
+		DX12DescriptorHeap& heap = cbvSrvUavDescriptorHeaps[currentFrame];
+		assert(heap.size < heap.capacity && "D3D12 error: appendUAV exceeded heap capacity");
+		DX12Descriptor descriptor = { {heap.cpuHandle.ptr + heap.descriptorSize * heap.size}, {heap.gpuHandle.ptr + heap.descriptorSize * heap.size} };
+		device->CreateUnorderedAccessView(resource, nullptr, nullptr, descriptor.cpuHandle);
+		heap.size += 1;
+		return descriptor;
+	}
+	DX12Descriptor appendDescriptorSRVTexture(ID3D12Resource* resource) {
+		DX12DescriptorHeap& heap = cbvSrvUavDescriptorHeaps[currentFrame];
+		assert(heap.size < heap.capacity && "D3D12 error: appendSRVTexture exceeded heap capacity");
+		DX12Descriptor descriptor = { {heap.cpuHandle.ptr + heap.descriptorSize * heap.size}, {heap.gpuHandle.ptr + heap.descriptorSize * heap.size} };
+		device->CreateShaderResourceView(resource, nullptr, descriptor.cpuHandle);
+		heap.size += 1;
+		return descriptor;
+	}
+	DX12Descriptor appendDescriptorSRVStructuredBuffer(ID3D12Resource* resource, uint64 firstElem, uint64 numElem, uint64 stride) {
+		DX12DescriptorHeap& heap = cbvSrvUavDescriptorHeaps[currentFrame];
+		assert(heap.size < heap.capacity && "D3D12 error: appendSRVStructuredBuffer exceeded heap capacity");
+		DX12Descriptor descriptor = { {heap.cpuHandle.ptr + heap.descriptorSize * heap.size}, {heap.gpuHandle.ptr + heap.descriptorSize * heap.size} };
+		D3D12_SHADER_RESOURCE_VIEW_DESC desc = {};
+		desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+		desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		desc.Buffer.FirstElement = firstElem;
+		desc.Buffer.NumElements = static_cast<uint>(numElem);
+		desc.Buffer.StructureByteStride = static_cast<uint>(stride);
+		device->CreateShaderResourceView(resource, &desc, descriptor.cpuHandle);
+		heap.size += 1;
+		return descriptor;
+	}
+	DX12Descriptor appendDescriptorSRVTLAS(ID3D12Resource* resource) {
+		DX12DescriptorHeap& heap = cbvSrvUavDescriptorHeaps[currentFrame];
+		assert(heap.size < heap.capacity && "D3D12 error: appendSRVTLAS exceeded heap capacity");
+		DX12Descriptor descriptor = { {heap.cpuHandle.ptr + heap.descriptorSize * heap.size}, {heap.gpuHandle.ptr + heap.descriptorSize * heap.size} };
+		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+		srvDesc.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+		srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		srvDesc.RaytracingAccelerationStructure.Location = resource->GetGPUVirtualAddress();
+		device->CreateShaderResourceView(nullptr, &srvDesc, descriptor.cpuHandle);
+		heap.size += 1;
+		return descriptor;
+	}
+	void closeAndExecuteCommandList(DX12CommandList& cmdList) {
 		dx12Assert(cmdList.list->Close());
 		graphicsCommandQueue->ExecuteCommandLists(1, reinterpret_cast<ID3D12CommandList**>(&cmdList.list));
 		cmdList.fenceValue += 1;
-		dx12Assert(graphicsCommandQueue->Signal(cmdList.fence, cmdList.fenceValue));
 		dx12Assert(cmdList.fence->SetEventOnCompletion(cmdList.fenceValue, cmdList.fenceEvent));
+		dx12Assert(graphicsCommandQueue->Signal(cmdList.fence, cmdList.fenceValue));
+	}
+	void waitAndResetCommandList(DX12CommandList& cmdList) {
+		DWORD waitResult = WaitForSingleObject(cmdList.fenceEvent, INFINITE);
+		assert(waitResult == WAIT_OBJECT_0 && "WaitForSingleObject error");
+		dx12Assert(cmdList.allocator->Reset());
+		dx12Assert(cmdList.list->Reset(cmdList.allocator, nullptr));
 	}
 	void drainGraphicsCommandQueue() const {
-		static uint64_t signalValue = 0;
+		static uint64 signalValue = 0;
 		signalValue += 1;
-		dx12Assert(graphicsCommandQueue->Signal(graphicsCommandQueueFence, signalValue));
 		dx12Assert(graphicsCommandQueueFence->SetEventOnCompletion(signalValue, graphicsCommandQueueFenceEvent));
+		dx12Assert(graphicsCommandQueue->Signal(graphicsCommandQueueFence, signalValue));
 		DWORD waitResult = WaitForSingleObject(graphicsCommandQueueFenceEvent, INFINITE);
-		assert(waitResult == WAIT_OBJECT_0);
+		assert(waitResult == WAIT_OBJECT_0 && "WaitForSingleObject error");
 	}
 	void resizeSwapChain(int width, int height) {
 		drainGraphicsCommandQueue();
