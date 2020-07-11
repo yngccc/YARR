@@ -8,6 +8,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <windowsx.h>
+#include <shellapi.h>
 #include <shellscalingapi.h>
 #include <comdef.h>
 #include <commdlg.h>
@@ -88,6 +89,24 @@ std::string getErrorStr(DWORD error = GetLastError()) {
 	else {
 		return buf;
 	}
+}
+
+std::vector<std::wstring> getCmdLineArgs() {
+	LPWSTR cmdLine = GetCommandLineW();
+	int cmdLineArgCount = 0;
+	LPWSTR* cmdLineArgs = CommandLineToArgvW(cmdLine, &cmdLineArgCount);
+	if (!cmdLineArgs) {
+		throw Exception("CommandLineToArgvW error: " + getErrorStr());
+	}
+	if (cmdLineArgCount < 1) {
+		throw Exception("CommandLineToArgvW error: cmdLineArgCount == " + std::to_string(cmdLineArgCount));
+	}
+	std::vector<std::wstring> args(cmdLineArgCount - 1);
+	for (int i = 0; i < cmdLineArgCount - 1; i += 1) {
+		args[i] = cmdLineArgs[i + 1];
+	}
+	LocalFree(cmdLineArgs);
+	return args;
 }
 
 template <typename T>
@@ -172,7 +191,7 @@ struct Window {
 		if (!windowHandle) {
 			throw Exception("CreateWindowExA error:" + getErrorStr());
 		}
-		SetWindowPos(windowHandle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE); // set window to be always on top
+		//SetWindowPos(windowHandle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE); // set window to be always on top
 
 		RAWINPUTDEVICE rawInputDevice;
 		rawInputDevice.usUsagePage = 0x01;

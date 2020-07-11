@@ -53,6 +53,7 @@ struct ModelMaterial {
 	std::array<float, 3> emissiveFactor = {};
 	int emissiveTextureIndex = -1;
 	int emissiveTextureSamplerIndex = -1;
+	float alphaCutoff = 0.5;
 };
 
 struct Model {
@@ -436,6 +437,7 @@ struct Scene {
 		model.materials.reserve(gltfModel.materials.size());
 		for (auto& gltfMaterial : gltfModel.materials) {
 			ModelMaterial material;
+			material.alphaCutoff = static_cast<float>(gltfMaterial.alphaCutoff);
 			for (int i = 0; i < 4; i += 1) {
 				material.baseColorFactor[i] = static_cast<float>(gltfMaterial.pbrMetallicRoughness.baseColorFactor[i]);
 			}
@@ -484,7 +486,7 @@ struct Scene {
 			assert(format != DXGI_FORMAT_UNKNOWN);
 			DX12Texture texture = dx12.createTexture(gltfImage.width, gltfImage.height, 1, 1, format, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
 			DX12TextureCopy textureCopy = {
-				texture, reinterpret_cast<char*>(gltfImage.image.data()), gltfImage.image.size(),
+				texture, gltfImage.image.data(), gltfImage.image.size(),
 				D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
 			};
 			dx12.copyTextures(&textureCopy, 1);

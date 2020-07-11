@@ -79,7 +79,7 @@
     <FxCompile Include="hlsl\gbufferPS.hlsl">
       <Filter>Source Files\hlsl</Filter>
     </FxCompile>
-    <FxCompile Include="hlsl\sceneRT.hlsl">
+    <FxCompile Include="hlsl\primaryRay.hlsl">
       <Filter>Source Files\hlsl</Filter>
     </FxCompile>
   </ItemGroup>

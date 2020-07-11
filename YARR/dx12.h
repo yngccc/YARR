@@ -61,7 +61,7 @@ struct DX12Texture {
 
 struct DX12TextureCopy {
 	DX12Texture dstTexture;
-	char* srcTexture;
+	uint8* srcTexture;
 	uint64 srcTextureSize;
 	D3D12_RESOURCE_STATES beforeResourceState;
 	D3D12_RESOURCE_STATES afterResourceState;
@@ -99,8 +99,10 @@ struct DX12Context {
 	DX12Buffer imguiVertexBuffers[maxFrameInFlight];
 	DX12Buffer imguiIndexBuffers[maxFrameInFlight];
 
+	DX12Texture positionTexture;
+	DX12Texture normalTexture;
 	DX12Texture colorTexture;
-	DX12Texture depthTexture;
+	DX12Texture emissiveTexture;
 	DX12Texture imguiTexture;
 
 	ID3D12RootSignature* swapChainRootSignature = nullptr;
@@ -109,28 +111,33 @@ struct DX12Context {
 	ID3D12RootSignature* imguiRootSignature = nullptr;
 	ID3D12PipelineState* imguiPipelineState = nullptr;
 
-	ID3D12StateObject* rayTracingStateObject = nullptr;
-	ID3D12StateObjectProperties* rayTracingObjectProps = nullptr;
-	DX12Buffer rayTracingShaderTableBuffers[maxFrameInFlight];
+	ID3D12StateObject* primaryRayStateObject = nullptr;
+	ID3D12StateObjectProperties* primaryRayObjectProps = nullptr;
+	DX12Buffer primaryRayShaderTableBuffers[maxFrameInFlight];
+
 	uint64 rayTracingShaderRecordSize;
 
 	DX12Context() = default;
-	DX12Context(const Window& window) {
+	DX12Context(const Window& window, bool debug) {
 		{
-			dx12Assert(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController)));
-			dx12Assert(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController2)));
-			debugController->EnableDebugLayer();
-			debugController->SetEnableGPUBasedValidation(true);
-			debugController->SetEnableSynchronizedCommandQueueValidation(true);
-			debugController2->SetGPUBasedValidationFlags(D3D12_GPU_BASED_VALIDATION_FLAGS_NONE);
+			UINT factoryFlags = 0;
+			if (debug) {
+				factoryFlags = DXGI_CREATE_FACTORY_DEBUG;
+				
+				dx12Assert(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController)));
+				dx12Assert(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController2)));
+				debugController->EnableDebugLayer();
+				debugController->SetEnableGPUBasedValidation(true);
+				debugController->SetEnableSynchronizedCommandQueueValidation(true);
+				debugController2->SetGPUBasedValidationFlags(D3D12_GPU_BASED_VALIDATION_FLAGS_NONE);
 
-			dx12Assert(DXGIGetDebugInterface1(0, IID_PPV_ARGS(&dxgiDebug)));
-			dx12Assert(DXGIGetDebugInterface1(0, IID_PPV_ARGS(&dxgiInfoQueue)));
-			dx12Assert(dxgiInfoQueue->SetBreakOnSeverity(DXGI_DEBUG_ALL, DXGI_INFO_QUEUE_MESSAGE_SEVERITY_CORRUPTION, true));
-			dx12Assert(dxgiInfoQueue->SetBreakOnSeverity(DXGI_DEBUG_ALL, DXGI_INFO_QUEUE_MESSAGE_SEVERITY_ERROR, true));
-			dx12Assert(dxgiInfoQueue->SetBreakOnSeverity(DXGI_DEBUG_ALL, DXGI_INFO_QUEUE_MESSAGE_SEVERITY_WARNING, true));
-
-			dx12Assert(CreateDXGIFactory2(DXGI_CREATE_FACTORY_DEBUG, IID_PPV_ARGS(&dxgiFactory)));
+				dx12Assert(DXGIGetDebugInterface1(0, IID_PPV_ARGS(&dxgiDebug)));
+				dx12Assert(DXGIGetDebugInterface1(0, IID_PPV_ARGS(&dxgiInfoQueue)));
+				dx12Assert(dxgiInfoQueue->SetBreakOnSeverity(DXGI_DEBUG_ALL, DXGI_INFO_QUEUE_MESSAGE_SEVERITY_CORRUPTION, true));
+				dx12Assert(dxgiInfoQueue->SetBreakOnSeverity(DXGI_DEBUG_ALL, DXGI_INFO_QUEUE_MESSAGE_SEVERITY_ERROR, true));
+				dx12Assert(dxgiInfoQueue->SetBreakOnSeverity(DXGI_DEBUG_ALL, DXGI_INFO_QUEUE_MESSAGE_SEVERITY_WARNING, true));
+			}
+			dx12Assert(CreateDXGIFactory2(factoryFlags, IID_PPV_ARGS(&dxgiFactory)));
 			dx12Assert(dxgiFactory->EnumAdapterByGpuPreference(0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&adapter)));
 			dx12Assert(D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&device)));
 
@@ -232,18 +239,22 @@ struct DX12Context {
 			imguiIndexBuffers[i].buffer->SetName(L"imguiIndexBuffer");
 		}
 		{
-			colorTexture = createTexture(window.width, window.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			positionTexture = createTexture(window.width, window.height, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			positionTexture.texture->SetName(L"positionTexture");
+			normalTexture = createTexture(window.width, window.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			normalTexture.texture->SetName(L"normalTexture");
+			colorTexture = createTexture(window.width, window.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 			colorTexture.texture->SetName(L"colorTexture");
-			depthTexture = createTexture(window.width, window.height, 1, 1, DXGI_FORMAT_D32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-			depthTexture.texture->SetName(L"depthTexture");
+			emissiveTexture = createTexture(window.width, window.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			emissiveTexture.texture->SetName(L"emissiveTexture");
 
 			ImGuiIO& io = ImGui::GetIO();
 			ImFont* imFont = io.Fonts->AddFontDefault();
 			assert(imFont);
-			char* imguiTextureData;
+			uint8* imguiTextureData;
 			int imguiTextureWidth;
 			int imguiTextureHeight;
-			io.Fonts->GetTexDataAsRGBA32(reinterpret_cast<uint8**>(&imguiTextureData), &imguiTextureWidth, &imguiTextureHeight);
+			io.Fonts->GetTexDataAsRGBA32(&imguiTextureData, &imguiTextureWidth, &imguiTextureHeight);
 			imguiTexture = createTexture(imguiTextureWidth, imguiTextureHeight, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
 			imguiTexture.texture->SetName(L"imguiTexture");
 			DX12TextureCopy textureCopy = { imguiTexture, imguiTextureData,  4ull * imguiTextureWidth * imguiTextureHeight, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE };
@@ -256,19 +267,19 @@ struct DX12Context {
 		static auto swapChainPSWriteTime = std::filesystem::last_write_time("swapChainPS.cso");
 		static auto imguiVSWriteTime = std::filesystem::last_write_time("imguiVS.cso");
 		static auto imguiPSWriteTime = std::filesystem::last_write_time("imguiPS.cso");
-		static auto sceneRTWriteTime = std::filesystem::last_write_time("sceneRT.cso");
+		static auto primaryRayWriteTime = std::filesystem::last_write_time("primaryRay.cso");
 
 		auto curSwapChainVSWriteTime = std::filesystem::last_write_time("swapChainVS.cso");
 		auto curSwapChainPSWriteTime = std::filesystem::last_write_time("swapChainPS.cso");
 		auto curImguiVSWriteTime = std::filesystem::last_write_time("imguiVS.cso");
 		auto curImguiPSWriteTime = std::filesystem::last_write_time("imguiPS.cso");
-		auto curSceneRTWriteTime = std::filesystem::last_write_time("sceneRT.cso");
+		auto curPrimaryRayWriteTime = std::filesystem::last_write_time("primaryRay.cso");
 
 		bool compileSwapChainShaders = curSwapChainVSWriteTime > swapChainVSWriteTime || curSwapChainPSWriteTime > swapChainPSWriteTime;
 		bool compileImguiShaders = curImguiVSWriteTime > imguiVSWriteTime || curImguiPSWriteTime > imguiPSWriteTime;
-		bool compileSceneRTShader = curSceneRTWriteTime > sceneRTWriteTime;
+		bool compilePrimaryRayShader = curPrimaryRayWriteTime > primaryRayWriteTime;
 		
-		if (forceCompile || compileSwapChainShaders || compileImguiShaders || compileSceneRTShader) {
+		if (forceCompile || compileSwapChainShaders || compileImguiShaders || compilePrimaryRayShader) {
 			drainGraphicsCommandQueue();
 		}
 		if (forceCompile || compileSwapChainShaders) {
@@ -337,19 +348,19 @@ struct DX12Context {
 			psoDesc.SampleDesc.Count = 1;
 			dx12Assert(device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&imguiPipelineState)));
 		}
-		if (forceCompile || compileSceneRTShader) {
-			if (rayTracingStateObject) {
-				rayTracingStateObject->Release();
+		if (forceCompile || compilePrimaryRayShader) {
+			if (primaryRayStateObject) {
+				primaryRayStateObject->Release();
 			}
-			if (rayTracingObjectProps) {
-				rayTracingObjectProps->Release();
+			if (primaryRayObjectProps) {
+				primaryRayObjectProps->Release();
 			}
-			sceneRTWriteTime = curSceneRTWriteTime;
+			primaryRayWriteTime = curPrimaryRayWriteTime;
 
 			D3D12_STATE_SUBOBJECT stateSubobjects[6] = {};
 
-			std::vector<char> bytecode = readFile("sceneRT.cso");
-			D3D12_EXPORT_DESC exportDescs[] = { {L"rayGen"}, {L"closestHit"}, {L"anyHit"}, {L"miss"} };
+			std::vector<char> bytecode = readFile("primaryRay.cso");
+			D3D12_EXPORT_DESC exportDescs[] = { {L"primaryRayGen"}, {L"primaryRayClosestHit"}, {L"primaryRayAnyHit"}, {L"primaryRayMiss"} };
 			D3D12_DXIL_LIBRARY_DESC dxilLibDesc = {};
 			dxilLibDesc.DXILLibrary.pShaderBytecode = bytecode.data();
 			dxilLibDesc.DXILLibrary.BytecodeLength = bytecode.size();
@@ -359,18 +370,18 @@ struct DX12Context {
 
 			D3D12_DESCRIPTOR_RANGE descriptorRange[4] = {};
 			descriptorRange[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-			descriptorRange[0].NumDescriptors = 1;
 			descriptorRange[0].OffsetInDescriptorsFromTableStart = 0;
+			descriptorRange[0].NumDescriptors = 4;
 			descriptorRange[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+			descriptorRange[1].OffsetInDescriptorsFromTableStart = 4;
 			descriptorRange[1].NumDescriptors = 1;
-			descriptorRange[1].OffsetInDescriptorsFromTableStart = 1;
 			descriptorRange[2].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+			descriptorRange[2].OffsetInDescriptorsFromTableStart = 5;
 			descriptorRange[2].NumDescriptors = 4;
-			descriptorRange[2].OffsetInDescriptorsFromTableStart = 2;
 			descriptorRange[3].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+			descriptorRange[3].OffsetInDescriptorsFromTableStart = 9;
 			descriptorRange[3].NumDescriptors = UINT_MAX;
 			descriptorRange[3].BaseShaderRegister = 4;
-			descriptorRange[3].OffsetInDescriptorsFromTableStart = 6;
 
 			D3D12_ROOT_PARAMETER rootParams[1] = {};
 			rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -397,7 +408,7 @@ struct DX12Context {
 			rootSigBlob->Release();
 			stateSubobjects[1] = { D3D12_STATE_SUBOBJECT_TYPE_LOCAL_ROOT_SIGNATURE, &rootSig };
 
-			const wchar_t* exportNames[] = { L"rayGen", L"closestHit", L"anyHit", L"miss", };
+			const wchar_t* exportNames[] = { L"primaryRayGen", L"primaryRayClosestHit", L"primaryRayAnyHit", L"primaryRayMiss", };
 			D3D12_SUBOBJECT_TO_EXPORTS_ASSOCIATION association0 = {};
 			association0.NumExports = countof<UINT>(exportNames);
 			association0.pExports = exportNames;
@@ -405,18 +416,18 @@ struct DX12Context {
 			stateSubobjects[2] = { D3D12_STATE_SUBOBJECT_TYPE_SUBOBJECT_TO_EXPORTS_ASSOCIATION, &association0 };
 
 			D3D12_HIT_GROUP_DESC hitGroupDesc = {};
-			hitGroupDesc.HitGroupExport = L"hitGroup";
+			hitGroupDesc.HitGroupExport = L"primaryRayHitGroup";
 			hitGroupDesc.Type = D3D12_HIT_GROUP_TYPE_TRIANGLES;
-			hitGroupDesc.AnyHitShaderImport = L"anyHit";
-			hitGroupDesc.ClosestHitShaderImport = L"closestHit";
+			hitGroupDesc.AnyHitShaderImport = L"primaryRayAnyHit";
+			hitGroupDesc.ClosestHitShaderImport = L"primaryRayClosestHit";
 			stateSubobjects[3] = { D3D12_STATE_SUBOBJECT_TYPE_HIT_GROUP, &hitGroupDesc };
 
 			D3D12_RAYTRACING_PIPELINE_CONFIG pipelineConfig = {};
-			pipelineConfig.MaxTraceRecursionDepth = 2;
+			pipelineConfig.MaxTraceRecursionDepth = 1;
 			stateSubobjects[4] = { D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_PIPELINE_CONFIG, &pipelineConfig };
 
 			D3D12_RAYTRACING_SHADER_CONFIG shaderConfig = {};
-			shaderConfig.MaxPayloadSizeInBytes = 32;
+			shaderConfig.MaxPayloadSizeInBytes = 48;
 			shaderConfig.MaxAttributeSizeInBytes = 8;
 			stateSubobjects[5] = { D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_SHADER_CONFIG, &shaderConfig };
 
@@ -424,13 +435,13 @@ struct DX12Context {
 			stateObjectDesc.Type = D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE;
 			stateObjectDesc.NumSubobjects = countof<UINT>(stateSubobjects);
 			stateObjectDesc.pSubobjects = stateSubobjects;
-			dx12Assert(device->CreateStateObject(&stateObjectDesc, IID_PPV_ARGS(&rayTracingStateObject)));
-			dx12Assert(rayTracingStateObject->QueryInterface(IID_PPV_ARGS(&rayTracingObjectProps)));
+			dx12Assert(device->CreateStateObject(&stateObjectDesc, IID_PPV_ARGS(&primaryRayStateObject)));
+			dx12Assert(primaryRayStateObject->QueryInterface(IID_PPV_ARGS(&primaryRayObjectProps)));
 
 			rayTracingShaderRecordSize = align(D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES + 32, D3D12_RAYTRACING_SHADER_RECORD_BYTE_ALIGNMENT);
 			for (int i = 0; i < maxFrameInFlight; i += 1) {
-				rayTracingShaderTableBuffers[i] = createBuffer(3 * rayTracingShaderRecordSize, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
-				rayTracingShaderTableBuffers[i].buffer->SetName(L"rtSceneShaderTable");
+				primaryRayShaderTableBuffers[i] = createBuffer(3 * rayTracingShaderRecordSize, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+				primaryRayShaderTableBuffers[i].buffer->SetName(L"primaryRayShaderTable");
 			}
 		}
 	}
@@ -501,7 +512,7 @@ struct DX12Context {
 			char* stageBufferPtr = nullptr;
 			D3D12_RANGE mapBufferRange = { 0, 0 };
 			stageBuffer.buffer->Map(0, &mapBufferRange, reinterpret_cast<void**>(&stageBufferPtr));
-			char* srcTexturePtr = textureCopy.srcTexture;
+			uint8* srcTexturePtr = textureCopy.srcTexture;
 			for (int subresourceIndex = 0; subresourceIndex < subresourceCount; subresourceIndex += 1) {
 				UINT64 offset = footprints[subresourceIndex].Offset;
 				UINT rowPitch = footprints[subresourceIndex].Footprint.RowPitch;
@@ -659,5 +670,17 @@ struct DX12Context {
 			swapChain->GetBuffer(i, IID_PPV_ARGS(&swapChainImages[i]));
 			swapChainImages[i]->SetName(L"swapChain");
 		}
+		positionTexture.texture->Release();
+		normalTexture.texture->Release();
+		colorTexture.texture->Release();
+		emissiveTexture.texture->Release();
+		positionTexture = createTexture(width, height, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+		normalTexture = createTexture(width, height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+		colorTexture = createTexture(width, height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+		emissiveTexture = createTexture(width, height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+		positionTexture.texture->SetName(L"positionTexture");
+		normalTexture.texture->SetName(L"normalTexture");
+		colorTexture.texture->SetName(L"colorTexture");
+		emissiveTexture.texture->SetName(L"emissiveTexture");
 	}
 };

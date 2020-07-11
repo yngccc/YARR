@@ -43,14 +43,15 @@ struct Gamepad {
 	}
 };
 
-static bool quit = false;
-static double frameTime = 0;
+static std::vector<std::wstring> cmdLineArgs = getCmdLineArgs();
 static Window window;
+static Gamepad gamepad;
 static DX12Context dx12;
 static std::vector<Scene> scenes = {};
 static uint64 currentSceneIndex = 0;
-static Gamepad gamepad;
 static const char* settingsFilePath = "settings.ini";
+static bool quit = false;
+static double frameTime = 0;
 
 void imGuiInit() {
 	ImGui::CreateContext();
@@ -97,7 +98,7 @@ LRESULT processWindowMsg(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 		char title[128] = {};
 		snprintf(title, sizeof(title), "YARR %d x %d", window.width, window.height);
 		SetWindowTextA(window.handle, title);
-		// ImGui::GetIO().DisplaySize = { (float)window.width, (float)window.height };
+		ImGui::GetIO().DisplaySize = { static_cast<float>(window.width), static_cast<float>(window.height) };
 		// ImGuizmo::SetRect(0, 0, (float)window.width, (float)window.height);
 		dx12.resizeSwapChain(window.width, window.height);
 	} break;
@@ -442,10 +443,16 @@ void graphicsCommands() {
 			struct {
 				DirectX::XMMATRIX screenToWorldMat;
 				DirectX::XMVECTOR cameraPosition;
-			} constants = { DirectX::XMMatrixTranspose(DirectX::XMMatrixInverse(nullptr, viewProjMat)), scene.camera.position };
+				int bounceCount;
+				int sampleCount;
+				int frameCount;
+			} constants = { DirectX::XMMatrixTranspose(DirectX::XMMatrixInverse(nullptr, viewProjMat)), scene.camera.position, 2, 16, static_cast<int>(dx12.totalFrame % INT_MAX) };
 			uint64 constantsOffset = dx12.appendConstantBuffer(&constants, sizeof(constants));
 
-			DX12Descriptor firstDescriptor = dx12.appendDescriptorUAV(dx12.colorTexture.texture);
+			DX12Descriptor firstDescriptor = dx12.appendDescriptorUAV(dx12.positionTexture.texture);
+			dx12.appendDescriptorUAV(dx12.normalTexture.texture);
+			dx12.appendDescriptorUAV(dx12.colorTexture.texture);
+			dx12.appendDescriptorUAV(dx12.emissiveTexture.texture);
 			dx12.appendDescriptorCBV(dx12.constantsBuffers[dx12.currentFrame].buffer, constantsOffset, sizeof(constants));
 			dx12.appendDescriptorSRVTLAS(scene.tlasBuffer.buffer);
 			dx12.appendDescriptorSRVStructuredBuffer(scene.instanceInfosBuffer.buffer, 0, scene.instanceCount, sizeof(InstanceInfo));
@@ -456,27 +463,30 @@ void graphicsCommands() {
 					dx12.appendDescriptorSRVTexture(texture.texture);
 				}
 			}
-			DX12Buffer& shaderTableBuffer = dx12.rayTracingShaderTableBuffers[dx12.currentFrame];
+			DX12Buffer& shaderTableBuffer = dx12.primaryRayShaderTableBuffers[dx12.currentFrame];
 			dx12Assert(shaderTableBuffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&shaderTableBuffer.bufferPtr)));
-			memcpy(shaderTableBuffer.bufferPtr, dx12.rayTracingObjectProps->GetShaderIdentifier(L"rayGen"), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
+			memcpy(shaderTableBuffer.bufferPtr, dx12.primaryRayObjectProps->GetShaderIdentifier(L"primaryRayGen"), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
 			memcpy(shaderTableBuffer.bufferPtr + D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES, &firstDescriptor.gpuHandle, 8);
-			memcpy(shaderTableBuffer.bufferPtr + dx12.rayTracingShaderRecordSize, dx12.rayTracingObjectProps->GetShaderIdentifier(L"miss"), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
+			memcpy(shaderTableBuffer.bufferPtr + dx12.rayTracingShaderRecordSize, dx12.primaryRayObjectProps->GetShaderIdentifier(L"primaryRayMiss"), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
 			memcpy(shaderTableBuffer.bufferPtr + dx12.rayTracingShaderRecordSize + D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES, &firstDescriptor.gpuHandle, 8);
-			memcpy(shaderTableBuffer.bufferPtr + dx12.rayTracingShaderRecordSize * 2, dx12.rayTracingObjectProps->GetShaderIdentifier(L"hitGroup"), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
+			memcpy(shaderTableBuffer.bufferPtr + dx12.rayTracingShaderRecordSize * 2, dx12.primaryRayObjectProps->GetShaderIdentifier(L"primaryRayHitGroup"), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
 			memcpy(shaderTableBuffer.bufferPtr + dx12.rayTracingShaderRecordSize * 2 + D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES, &firstDescriptor.gpuHandle, 8);
 			shaderTableBuffer.buffer->Unmap(0, nullptr);
 			{
 				PIXScopedEvent(cmdList.list, PIX_COLOR_DEFAULT, "Primary Rays");
 
-				D3D12_RESOURCE_BARRIER barrier = {};
-				barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-				barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-				barrier.Transition.pResource = dx12.colorTexture.texture;
-				barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-				barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-				cmdList.list->ResourceBarrier(1, &barrier);
+				D3D12_RESOURCE_BARRIER barriers[4] = {};
+				ID3D12Resource* textures[4] = { dx12.positionTexture.texture, dx12.normalTexture.texture, dx12.colorTexture.texture, dx12.emissiveTexture.texture };
+				for (int i = 0; i < countof(barriers); i += 1) {
+					barriers[i].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+					barriers[i].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+					barriers[i].Transition.pResource = textures[i];
+					barriers[i].Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+					barriers[i].Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+				}
+				cmdList.list->ResourceBarrier(countof(barriers), barriers);
 
-				cmdList.list->SetPipelineState1(dx12.rayTracingStateObject);
+				cmdList.list->SetPipelineState1(dx12.primaryRayStateObject);
 				cmdList.list->SetDescriptorHeaps(1, &dx12.cbvSrvUavDescriptorHeaps[dx12.currentFrame].heap);
 
 				D3D12_GPU_VIRTUAL_ADDRESS shaderTablePtr = shaderTableBuffer.buffer->GetGPUVirtualAddress();
@@ -490,9 +500,11 @@ void graphicsCommands() {
 				dispatchRaysDesc.HitGroupTable = { shaderTablePtr + recordSize * 2, recordSize, recordSize };
 				cmdList.list->DispatchRays(&dispatchRaysDesc);
 
-				barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-				barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-				cmdList.list->ResourceBarrier(1, &barrier);
+				for (int i = 0; i < countof(barriers); i += 1) {
+					barriers[i].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+					barriers[i].Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+				}
+				cmdList.list->ResourceBarrier(countof(barriers), barriers);
 			}
 		}
 	}
@@ -651,7 +663,7 @@ int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
 	imGuiInit();
 
 	window = Window(processWindowMsg);
-	dx12 = DX12Context(window);
+	dx12 = DX12Context(window, std::any_of(cmdLineArgs.begin(), cmdLineArgs.end(), [](auto& args) { return args == L"-d3dDebug"; }));
 
 	if (fileExists(settingsFilePath)) {
 		SettingParser parser(settingsFilePath);
