@@ -48,9 +48,11 @@ typedef int8_t int8;
 typedef uint8_t uint8;
 typedef int16_t int16;
 typedef uint16_t uint16;
-typedef uint32_t uint;
+typedef int32_t int32;
+typedef uint32_t uint32;
 typedef int64_t int64;
 typedef uint64_t uint64;
+typedef unsigned uint;
 
 template<typename I = uint64, typename T, uint64 N>
 constexpr I countof(T(&)[N]) {
@@ -65,6 +67,13 @@ T align(uint64 x, uint64 n) {
 	}
 	else {
 		return static_cast<T>(x + (n - remainder));
+	}
+}
+
+template<typename T, int N>
+void arrayCopy(T(&dest)[N], T(&src)[N]) {
+	for (int i = 0; i < N; i += 1) {
+		dest[i] = src[i];
 	}
 }
 
@@ -174,8 +183,7 @@ struct Window {
 			throw Exception("RegisterClassA error:" + getErrorStr());
 		}
 
-		HRESULT setDpiAwarenessResult = SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE);
-		if (setDpiAwarenessResult != S_OK) {
+		if (SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE) != S_OK) {
 			throw Exception("SetProcessDpiAwareness error:" + getErrorStr());
 		}
 		int screenW = GetSystemMetrics(SM_CXSCREEN);
@@ -324,13 +332,22 @@ struct Token {
 	Type type;
 	std::string_view str;
 
-	void toFloat(float& fp) {
+	void toFloat(float& f) {
 		if (type != Number) {
-			throw Exception("Token::toFloat: token is not a Token::Number");
+			throw Exception("Token::toFloat: token type is not Token::Number");
 		}
-		std::from_chars_result result = std::from_chars(str.data(), str.data() + str.length(), fp);
+		std::from_chars_result result = std::from_chars(str.data(), str.data() + str.length(), f);
 		if (result.ptr != str.data() + str.length()) {
 			throw Exception("Token::toFloat: cannot parse string \"" + std::string(str) + "\"");
+		}
+	}
+	void toInt(int& i) {
+		if (type != Number) {
+			throw Exception("Token::toUInt: token type is not Token::Number");
+		}
+		std::from_chars_result result = std::from_chars(str.data(), str.data() + str.length(), i);
+		if (result.ptr != str.data() + str.length()) {
+			throw Exception("Token::toUInt: cannot parse string \"" + std::string(str) + "\"");
 		}
 	}
 };

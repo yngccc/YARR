@@ -1,20 +1,8 @@
-#ifndef MISCS_HLSL
-#define MISCS_HLSL
-
-static const float PI = 3.1415926535897932f;
+#define PI 3.1415926535897932f
 
 float3 linearToSRGB(float3 rgb) {
 	rgb = clamp(rgb, float3(0, 0, 0), float3(1, 1, 1));
 	return max(1.055 * pow(rgb, 0.416666667) - 0.055, 0);
-}
-
-float3 acesFilmToneMap(float3 x) {
-	float a = 2.51f;
-	float b = 0.03f;
-	float c = 2.43f;
-	float d = 0.59f;
-	float e = 0.14f;
-	return saturate((x * (a * x + b)) / (x * (c * x + d) + e));
 }
 
 float2 barycentricsInterpolate(float2 barycentrics, float2 vertexAttrib[3]) {
@@ -107,5 +95,3 @@ float3 offsetRayOrigin(const float3 p, const float3 n) {
 		abs(p.y) < origin ? p.y + floatScale * n.y : p_i.y,
 		abs(p.z) < origin ? p.z + floatScale * n.z : p_i.z);
 }
-
-#endif

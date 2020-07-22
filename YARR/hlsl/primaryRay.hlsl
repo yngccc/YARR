@@ -1,35 +1,6 @@
-#include "miscs.hlsl"
+#include "utils.hlsli"
+#include "sceneStructs.hlsli"
 
-struct InstanceInfo {
-	float4x4 transformMat;
-	int triangleOffset;
-	int triangleCount;
-	int materialIndex;
-	int padding;
-};
-
-struct TriangleInfo {
-	float3 normals[3];
-	float2 texCoords[3];
-	float3 tangents[3];
-};
-
-struct MaterialInfo {
-	float4 baseColorFactor;
-	int baseColorTextureIndex;
-	int baseColorTectureSamplerIndex;
-	int normalTextureIndex;
-	int normalTectureSamplerIndex;
-	float3 emissiveFactor;
-	int emissiveTextureIndex;
-	int emissiveTectureSamplerIndex;
-	float alphaCutoff;
-};
-
-RWTexture2D<float3> positionTexture : register(u0);
-RWTexture2D<float3> normalTexture : register(u1);
-RWTexture2D<float3> colorTexture : register(u2);
-RWTexture2D<float3> emissiveTexture : register(u3);
 cbuffer constants : register(b0) {
 	float4x4 screenToWorldMat;
 	float4 eyePosition;
@@ -37,11 +8,18 @@ cbuffer constants : register(b0) {
 	int sampleCount;
 	int frameCount;
 };
+
+RWTexture2D<float3> positionTexture : register(u0);
+RWTexture2D<float3> normalTexture : register(u1);
+RWTexture2D<float3> baseColorTexture : register(u2);
+RWTexture2D<float3> emissiveTexture : register(u3);
+
 RaytracingAccelerationStructure scene : register(t0);
 StructuredBuffer<InstanceInfo> instanceInfos : register(t1);
-StructuredBuffer<TriangleInfo> triangleInfos : register(t2);
-StructuredBuffer<MaterialInfo> materialInfos : register(t3);
-Texture2D textures[] : register(t4);
+StructuredBuffer<GeometryInfo> geometryInfos : register(t2);
+StructuredBuffer<TriangleInfo> triangleInfos : register(t3);
+StructuredBuffer<MaterialInfo> materialInfos : register(t4);
+Texture2D textures[] : register(t5);
 sampler sampler0 : register(s0);
 
 void getEyeRay(uint2 dimensions, uint2 pixelIndex, inout float3 origin, inout float3 direction) {
@@ -56,7 +34,7 @@ void getEyeRay(uint2 dimensions, uint2 pixelIndex, inout float3 origin, inout fl
 	direction = normalize(world.xyz - origin);
 }
 
-struct PrimaryRayPayload {
+struct RayPayload {
 	float3 position;
 	float3 normal;
 	float3 color;
@@ -64,37 +42,38 @@ struct PrimaryRayPayload {
 };
 
 [shader("raygeneration")]
-void primaryRayGen() {
-	uint3 dimensions = DispatchRaysDimensions();
-	uint3 pixelIndex = DispatchRaysIndex();
+void rayGen() {
+	uint2 dimensions = DispatchRaysDimensions().xy;
+	uint2 pixelIndex = DispatchRaysIndex().xy;
 
 	float3 origin;
 	float3 direction;
-	getEyeRay(dimensions.xy, pixelIndex.xy, origin, direction);
+	getEyeRay(dimensions, pixelIndex, origin, direction);
 
 	RayDesc rayDesc;
 	rayDesc.Origin = origin;
 	rayDesc.Direction = direction;
 	rayDesc.TMin = 0;
-	rayDesc.TMax = 5000;
+	rayDesc.TMax = 500;
 
-	PrimaryRayPayload payload;
+	RayPayload payload;
 	payload.position = float3(0, 0, 0);
 	payload.normal = float3(0, 0, 0);
 	payload.color = float3(0, 0, 0);
 	payload.emissive = float3(0, 0, 0);
 	TraceRay(scene, RAY_FLAG_NONE, 0xff, 0, 0, 0, rayDesc, payload);
-	positionTexture[pixelIndex.xy] = payload.position;
-	normalTexture[pixelIndex.xy] = payload.normal;
-	colorTexture[pixelIndex.xy] = payload.color;
-	emissiveTexture[pixelIndex.xy] = payload.emissive;
+	positionTexture[pixelIndex] = payload.position;
+	normalTexture[pixelIndex] = payload.normal;
+	baseColorTexture[pixelIndex] = payload.color;
+	emissiveTexture[pixelIndex] = payload.emissive;
 }
 
 [shader("closesthit")]
-void primaryRayClosestHit(inout PrimaryRayPayload payload, in BuiltInTriangleIntersectionAttributes triangleAttribs) {
+void closestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes triangleAttribs) {
 	InstanceInfo instanceInfo = instanceInfos[InstanceIndex()];
-	MaterialInfo materialInfo = materialInfos[instanceInfo.materialIndex];
-	TriangleInfo triangleInfo = triangleInfos[instanceInfo.triangleOffset + PrimitiveIndex()];
+	GeometryInfo geometryInfo = geometryInfos[instanceInfo.geometryOffset + GeometryIndex()];
+	MaterialInfo materialInfo = materialInfos[geometryInfo.materialIndex];
+	TriangleInfo triangleInfo = triangleInfos[geometryInfo.triangleOffset + PrimitiveIndex()];
 	float3 position = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
 	float3 normal = barycentricsInterpolate(triangleAttribs.barycentrics, triangleInfo.normals);
 	float3 color = materialInfo.baseColorFactor.rgb;
@@ -119,11 +98,12 @@ void primaryRayClosestHit(inout PrimaryRayPayload payload, in BuiltInTriangleInt
 }
 
 [shader("anyhit")]
-void primaryRayAnyHit(inout PrimaryRayPayload payload, in BuiltInTriangleIntersectionAttributes triangleAttribs) {
+void anyHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes triangleAttribs) {
 	InstanceInfo instanceInfo = instanceInfos[InstanceIndex()];
-	MaterialInfo materialInfo = materialInfos[instanceInfo.materialIndex];
+	GeometryInfo geometryInfo = geometryInfos[instanceInfo.geometryOffset + GeometryIndex()];
+	MaterialInfo materialInfo = materialInfos[geometryInfo.materialIndex];
 	if (materialInfo.baseColorTextureIndex > 0) {
-		TriangleInfo triangleInfo = triangleInfos[instanceInfo.triangleOffset + PrimitiveIndex()];
+		TriangleInfo triangleInfo = triangleInfos[geometryInfo.triangleOffset + PrimitiveIndex()];
 		float2 texCoord = barycentricsInterpolate(triangleAttribs.barycentrics, triangleInfo.texCoords);
 		Texture2D baseColorTexture = textures[materialInfo.baseColorTextureIndex];
 		float4 color = baseColorTexture.SampleLevel(sampler0, texCoord, 0);
@@ -134,26 +114,10 @@ void primaryRayAnyHit(inout PrimaryRayPayload payload, in BuiltInTriangleInterse
 }
 
 [shader("miss")]
-void primaryRayMiss(inout PrimaryRayPayload payload) {
+void miss(inout RayPayload payload) {
 	payload.position = float3(0, 0, 0);
 	payload.normal = float3(0, 0, 0);
 	payload.color = float3(0, 0, 0);
 	payload.emissive = float3(0, 0, 0);
 }
 
-//float3 L = float3(0, 0, 0);
-//for (int i = 0; i < sampleCount; i += 1) {
-//	float3 vec = cosineSampleHemisphere(rayPayload.rngState);
-//	float3 dir = transformSampleVec(vec, normal);
-//
-//	RayDesc rayDesc;
-//	rayDesc.Origin = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
-//	//rayDesc.Origin = offsetRayOrigin(rayDesc.Origin, normal);
-//	rayDesc.Direction = dir;
-//	rayDesc.TMin = 0.0001;
-//	rayDesc.TMax = 5000;
-//	TraceRay(scene, RAY_FLAG_NONE, 0xff, 0, 0, 0, rayDesc, rayPayload);
-//	L += rayPayload.color;
-//	rayPayload.bounce = bounce;
-//}
-//L /= sampleCount;

@@ -4,8 +4,8 @@
 
 #define IMGUI_DISABLE_OBSOLETE_FUNCTIONS
 #define IMGUI_DEFINE_MATH_OPERATORS
-#include "thirdparty/include/imgui/imgui.h"
-#include "thirdparty/include/imgui/imgui_internal.h"
+#include "../thirdparty/include/imgui/imgui.h"
+#include "../thirdparty/include/imgui/imgui_internal.h"
 
 #include "scene.h"
 #include "test.h"
@@ -52,6 +52,7 @@ static uint64 currentSceneIndex = 0;
 static const char* settingsFilePath = "settings.ini";
 static bool quit = false;
 static double frameTime = 0;
+static bool fullScreen = false;
 
 void imGuiInit() {
 	ImGui::CreateContext();
@@ -93,14 +94,16 @@ LRESULT processWindowMsg(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 		ValidateRect(hwnd, nullptr);
 	} break;
 	case WM_SIZE: {
-		window.width = LOWORD(lparam);
-		window.height = HIWORD(lparam);
-		char title[128] = {};
-		snprintf(title, sizeof(title), "YARR %d x %d", window.width, window.height);
-		SetWindowTextA(window.handle, title);
-		ImGui::GetIO().DisplaySize = { static_cast<float>(window.width), static_cast<float>(window.height) };
-		// ImGuizmo::SetRect(0, 0, (float)window.width, (float)window.height);
-		dx12.resizeSwapChain(window.width, window.height);
+		int width = LOWORD(lparam);
+		int height = HIWORD(lparam);
+		if (width > 0 && height > 0) {
+			char title[128] = {};
+			snprintf(title, sizeof(title), "YARR %d x %d", width, height);
+			SetWindowTextA(window.handle, title);
+			dx12.resizeSwapChainBuffers(width, height);
+		}
+		window.width = width;
+		window.height = height;
 	} break;
 	case WM_SHOWWINDOW: {
 	} break;
@@ -109,15 +112,23 @@ LRESULT processWindowMsg(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 	case WM_SYSKEYDOWN:
 	case WM_SYSKEYUP: {
 		bool down = (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN);
-		ImGui::GetIO().KeysDown[wparam] = down;
+		ImGuiIO& io = ImGui::GetIO();
+		io.KeysDown[wparam] = down;
 		if (wparam == VK_SHIFT) {
-			ImGui::GetIO().KeyShift = down;
+			io.KeyShift = down;
 		}
 		else if (wparam == VK_CONTROL) {
-			ImGui::GetIO().KeyCtrl = down;
+			io.KeyCtrl = down;
 		}
 		else if (wparam == VK_MENU) {
-			ImGui::GetIO().KeyAlt = down;
+			io.KeyAlt = down;
+		}
+		if (io.KeysDown[VK_F4] && io.KeyAlt) {
+			quit = true;
+		}
+		if (io.KeysDown[VK_RETURN] && io.KeyAlt) {
+			fullScreen = !fullScreen;
+			dx12.swapChain->SetFullscreenState(fullScreen, dx12.output);
 		}
 	} break;
 	case WM_CHAR:
@@ -333,27 +344,32 @@ void imguiCommands() {
 	if (ImGui::BeginMainMenuBar()) {
 		mainMenuBarPos = ImGui::GetWindowPos();
 		mainMenuBarSize = ImGui::GetWindowSize();
-		if (ImGui::BeginMenu("Scene")) {
-			if (ImGui::MenuItem("New")) {
-				addScene("New Scene", "");
+		if (ImGui::BeginMenu("File")) {
+			if (ImGui::BeginMenu("New")) {
+				if (ImGui::MenuItem("Scene")) {
+					addScene("New Scene", "");
+				}
+				ImGui::EndMenu();
 			}
-			if (ImGui::MenuItem("Load")) {
-				try {
-					std::filesystem::path filePath = openFileDialog();
-					addScene("New Scene", filePath);
+			if (ImGui::BeginMenu("Open")) {
+				if (ImGui::MenuItem("Scene")) {
+					try {
+						std::filesystem::path filePath = openFileDialog();
+						addScene("New Scene", filePath);
+					}
+					catch (const std::exception& e) {
+						logWindow.addError(e.what());
+					}
 				}
-				catch (const std::exception& e) {
-					logWindow.addError(e.what());
-				}
+				ImGui::EndMenu();
+			}
+			ImGui::Separator();
+			if (ImGui::MenuItem("Quit")) {
+				quit = true;
 			}
 			ImGui::EndMenu();
 		}
 
-		if (ImGui::BeginMenu("Model")) {
-			if (ImGui::MenuItem("Load")) {
-			}
-			ImGui::EndMenu();
-		}
 		ImGui::EndMainMenuBar();
 	}
 
@@ -431,9 +447,11 @@ void imguiCommands() {
 void graphicsCommands() {
 	dx12.compileShaders();
 	dx12.resetDescriptorHeaps();
-	dx12.resetAndMapConstantBuffer();
+	dx12.resetAndMapFrameDataBuffer();
 
 	DX12CommandList& cmdList = dx12.graphicsCommandLists[dx12.currentFrame];
+	cmdList.list->SetDescriptorHeaps(1, &dx12.cbvSrvUavDescriptorHeaps[dx12.currentFrame].heap);
+
 	if (currentSceneIndex < scenes.size()) {
 		const Scene& scene = scenes[currentSceneIndex];
 		if (scene.tlasBuffer.buffer) {
@@ -446,79 +464,104 @@ void graphicsCommands() {
 				int bounceCount;
 				int sampleCount;
 				int frameCount;
-			} constants = { DirectX::XMMatrixTranspose(DirectX::XMMatrixInverse(nullptr, viewProjMat)), scene.camera.position, 2, 16, static_cast<int>(dx12.totalFrame % INT_MAX) };
-			uint64 constantsOffset = dx12.appendConstantBuffer(&constants, sizeof(constants));
+				int lightCount;
+			} constants = {
+					DirectX::XMMatrixTranspose(DirectX::XMMatrixInverse(nullptr, viewProjMat)),
+					scene.camera.position,
+					2, 16, 
+					static_cast<int>(dx12.totalFrame % INT_MAX), 
+					static_cast<int>(scene.lightCount)
+			};
+			uint64 constantsOffset = dx12.appendFrameDataBuffer(&constants, sizeof(constants), D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+			{
+				DX12Descriptor firstDescriptor = dx12.appendDescriptorCBV(dx12.frameDataBuffers[dx12.currentFrame].buffer, constantsOffset, sizeof(constants));
+				dx12.appendDescriptorUAV(dx12.positionTexture.texture);
+				dx12.appendDescriptorUAV(dx12.normalTexture.texture);
+				dx12.appendDescriptorUAV(dx12.baseColorTexture.texture);
+				dx12.appendDescriptorUAV(dx12.emissiveTexture.texture);
+				dx12.appendDescriptorSRVTLAS(scene.tlasBuffer.buffer);
+				dx12.appendDescriptorSRVStructuredBuffer(scene.instanceInfosBuffer.buffer, 0, scene.instanceInfoCount, sizeof(InstanceInfo));
+				dx12.appendDescriptorSRVStructuredBuffer(scene.geometryInfosBuffer.buffer, 0, scene.geometryInfoCount, sizeof(GeometryInfo));
+				dx12.appendDescriptorSRVStructuredBuffer(scene.triangleInfosBuffer.buffer, 0, scene.triangleInfoCount, sizeof(TriangleInfo));
+				dx12.appendDescriptorSRVStructuredBuffer(scene.materialInfosBuffer.buffer, 0, scene.materialInfoCount, sizeof(MaterialInfo));
+				for (auto& [name, model] : scene.models) {
+					for (auto& texture : model.textures) {
+						dx12.appendDescriptorSRVTexture(texture.texture);
+					}
+				}
+				uint8 shaderTableBuffer[DX12Context::shaderTableRecordSize * 3];
+				memcpy(shaderTableBuffer, dx12.primaryRayObjectProps->GetShaderIdentifier(L"rayGen"), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
+				memcpy(shaderTableBuffer + D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES, &firstDescriptor.gpuHandle, 8);
+				memcpy(shaderTableBuffer + DX12Context::shaderTableRecordSize, dx12.primaryRayObjectProps->GetShaderIdentifier(L"miss"), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
+				memcpy(shaderTableBuffer + DX12Context::shaderTableRecordSize + D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES, &firstDescriptor.gpuHandle, 8);
+				memcpy(shaderTableBuffer + DX12Context::shaderTableRecordSize * 2, dx12.primaryRayObjectProps->GetShaderIdentifier(L"hitGroup"), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
+				memcpy(shaderTableBuffer + DX12Context::shaderTableRecordSize * 2 + D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES, &firstDescriptor.gpuHandle, 8);
+				uint64 shaderTableOffset = dx12.appendFrameDataBuffer(shaderTableBuffer, sizeof(shaderTableBuffer), D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT);
+				{
+					PIXScopedEvent(cmdList.list, PIX_COLOR_DEFAULT, "primaryRays");
 
-			DX12Descriptor firstDescriptor = dx12.appendDescriptorUAV(dx12.positionTexture.texture);
-			dx12.appendDescriptorUAV(dx12.normalTexture.texture);
-			dx12.appendDescriptorUAV(dx12.colorTexture.texture);
-			dx12.appendDescriptorUAV(dx12.emissiveTexture.texture);
-			dx12.appendDescriptorCBV(dx12.constantsBuffers[dx12.currentFrame].buffer, constantsOffset, sizeof(constants));
-			dx12.appendDescriptorSRVTLAS(scene.tlasBuffer.buffer);
-			dx12.appendDescriptorSRVStructuredBuffer(scene.instanceInfosBuffer.buffer, 0, scene.instanceCount, sizeof(InstanceInfo));
-			dx12.appendDescriptorSRVStructuredBuffer(scene.triangleInfosBuffer.buffer, 0, scene.triangleCount, sizeof(TriangleInfo));
-			dx12.appendDescriptorSRVStructuredBuffer(scene.materialInfosBuffer.buffer, 0, scene.materialCount, sizeof(MaterialInfo));
-			for (auto& [name, model] : scene.models) {
-				for (auto& texture : model.textures) {
-					dx12.appendDescriptorSRVTexture(texture.texture);
+					cmdList.list->SetPipelineState1(dx12.primaryRayStateObject);
+					D3D12_GPU_VIRTUAL_ADDRESS shaderTablePtr = dx12.frameDataBuffers[dx12.currentFrame].buffer->GetGPUVirtualAddress() + shaderTableOffset;
+					D3D12_DISPATCH_RAYS_DESC dispatchRaysDesc = {};
+					dispatchRaysDesc.Width = dx12.renderResolutionX;
+					dispatchRaysDesc.Height = dx12.renderResolutionY;
+					dispatchRaysDesc.Depth = 1;
+					dispatchRaysDesc.RayGenerationShaderRecord = { shaderTablePtr, DX12Context::shaderTableRecordSize };
+					dispatchRaysDesc.MissShaderTable = { shaderTablePtr + DX12Context::shaderTableRecordSize, DX12Context::shaderTableRecordSize, DX12Context::shaderTableRecordSize };
+					dispatchRaysDesc.HitGroupTable = { shaderTablePtr + DX12Context::shaderTableRecordSize * 2, DX12Context::shaderTableRecordSize, DX12Context::shaderTableRecordSize };
+					cmdList.list->DispatchRays(&dispatchRaysDesc);
 				}
 			}
-			DX12Buffer& shaderTableBuffer = dx12.primaryRayShaderTableBuffers[dx12.currentFrame];
-			dx12Assert(shaderTableBuffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&shaderTableBuffer.bufferPtr)));
-			memcpy(shaderTableBuffer.bufferPtr, dx12.primaryRayObjectProps->GetShaderIdentifier(L"primaryRayGen"), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
-			memcpy(shaderTableBuffer.bufferPtr + D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES, &firstDescriptor.gpuHandle, 8);
-			memcpy(shaderTableBuffer.bufferPtr + dx12.rayTracingShaderRecordSize, dx12.primaryRayObjectProps->GetShaderIdentifier(L"primaryRayMiss"), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
-			memcpy(shaderTableBuffer.bufferPtr + dx12.rayTracingShaderRecordSize + D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES, &firstDescriptor.gpuHandle, 8);
-			memcpy(shaderTableBuffer.bufferPtr + dx12.rayTracingShaderRecordSize * 2, dx12.primaryRayObjectProps->GetShaderIdentifier(L"primaryRayHitGroup"), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
-			memcpy(shaderTableBuffer.bufferPtr + dx12.rayTracingShaderRecordSize * 2 + D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES, &firstDescriptor.gpuHandle, 8);
-			shaderTableBuffer.buffer->Unmap(0, nullptr);
 			{
-				PIXScopedEvent(cmdList.list, PIX_COLOR_DEFAULT, "Primary Rays");
-
-				D3D12_RESOURCE_BARRIER barriers[4] = {};
-				ID3D12Resource* textures[4] = { dx12.positionTexture.texture, dx12.normalTexture.texture, dx12.colorTexture.texture, dx12.emissiveTexture.texture };
-				for (int i = 0; i < countof(barriers); i += 1) {
-					barriers[i].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-					barriers[i].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-					barriers[i].Transition.pResource = textures[i];
-					barriers[i].Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-					barriers[i].Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+				DX12Descriptor firstDescriptor = dx12.appendDescriptorCBV(dx12.frameDataBuffers[dx12.currentFrame].buffer, constantsOffset, sizeof(constants));
+				dx12.appendDescriptorUAV(dx12.positionTexture.texture);
+				dx12.appendDescriptorUAV(dx12.normalTexture.texture);
+				dx12.appendDescriptorUAV(dx12.baseColorTexture.texture);
+				dx12.appendDescriptorUAV(dx12.outputTexture.texture);
+				dx12.appendDescriptorSRVTLAS(scene.tlasBuffer.buffer);
+				dx12.appendDescriptorSRVStructuredBuffer(scene.lightsBuffer.buffer, 0, scene.lightCount, sizeof(SceneLight));
+				uint8 shaderTableBuffer[DX12Context::shaderTableRecordSize * 3];
+				memcpy(shaderTableBuffer, dx12.directLightRayObjectProps->GetShaderIdentifier(L"rayGen"), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
+				memcpy(shaderTableBuffer + D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES, &firstDescriptor.gpuHandle, 8);
+				memcpy(shaderTableBuffer + DX12Context::shaderTableRecordSize, dx12.directLightRayObjectProps->GetShaderIdentifier(L"miss"), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
+				memcpy(shaderTableBuffer + DX12Context::shaderTableRecordSize + D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES, &firstDescriptor.gpuHandle, 8);
+				memcpy(shaderTableBuffer + DX12Context::shaderTableRecordSize * 2, dx12.directLightRayObjectProps->GetShaderIdentifier(L"hitGroup"), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
+				memcpy(shaderTableBuffer + DX12Context::shaderTableRecordSize * 2 + D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES, &firstDescriptor.gpuHandle, 8);
+				uint64 shaderTableOffset = dx12.appendFrameDataBuffer(shaderTableBuffer, sizeof(shaderTableBuffer), D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT);
+				{
+					PIXScopedEvent(cmdList.list, PIX_COLOR_DEFAULT, "directLightRays");
+					cmdList.list->SetPipelineState1(dx12.directLightRayStateObject);
+					D3D12_GPU_VIRTUAL_ADDRESS shaderTablePtr = dx12.frameDataBuffers[dx12.currentFrame].buffer->GetGPUVirtualAddress() + shaderTableOffset;
+					D3D12_DISPATCH_RAYS_DESC dispatchRaysDesc = {};
+					dispatchRaysDesc.Width = dx12.renderResolutionX;
+					dispatchRaysDesc.Height = dx12.renderResolutionY;
+					dispatchRaysDesc.Depth = 1;
+					dispatchRaysDesc.RayGenerationShaderRecord = { shaderTablePtr, DX12Context::shaderTableRecordSize };
+					dispatchRaysDesc.MissShaderTable = { shaderTablePtr + DX12Context::shaderTableRecordSize, DX12Context::shaderTableRecordSize, DX12Context::shaderTableRecordSize };
+					dispatchRaysDesc.HitGroupTable = { shaderTablePtr + DX12Context::shaderTableRecordSize * 2, DX12Context::shaderTableRecordSize, DX12Context::shaderTableRecordSize };
+					cmdList.list->DispatchRays(&dispatchRaysDesc);
 				}
-				cmdList.list->ResourceBarrier(countof(barriers), barriers);
-
-				cmdList.list->SetPipelineState1(dx12.primaryRayStateObject);
-				cmdList.list->SetDescriptorHeaps(1, &dx12.cbvSrvUavDescriptorHeaps[dx12.currentFrame].heap);
-
-				D3D12_GPU_VIRTUAL_ADDRESS shaderTablePtr = shaderTableBuffer.buffer->GetGPUVirtualAddress();
-				uint64 recordSize = dx12.rayTracingShaderRecordSize;
-				D3D12_DISPATCH_RAYS_DESC dispatchRaysDesc = {};
-				dispatchRaysDesc.Width = window.width;
-				dispatchRaysDesc.Height = window.height;
-				dispatchRaysDesc.Depth = 1;
-				dispatchRaysDesc.RayGenerationShaderRecord = { shaderTablePtr, recordSize };
-				dispatchRaysDesc.MissShaderTable = { shaderTablePtr + recordSize, recordSize, recordSize };
-				dispatchRaysDesc.HitGroupTable = { shaderTablePtr + recordSize * 2, recordSize, recordSize };
-				cmdList.list->DispatchRays(&dispatchRaysDesc);
-
-				for (int i = 0; i < countof(barriers); i += 1) {
-					barriers[i].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-					barriers[i].Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-				}
-				cmdList.list->ResourceBarrier(countof(barriers), barriers);
 			}
 		}
 	}
 	{
-		PIXScopedEvent(cmdList.list, PIX_COLOR_DEFAULT, "Tone Map to Swap Chain and UI");
+		PIXScopedEvent(cmdList.list, PIX_COLOR_DEFAULT, "swapChain + imGui");
 
-		UINT currentSwapChainImageIndex = dx12.swapChain->GetCurrentBackBufferIndex();
-		D3D12_RESOURCE_BARRIER swapChainImageBarrier = {};
-		swapChainImageBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-		swapChainImageBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-		swapChainImageBarrier.Transition.pResource = dx12.swapChainImages[currentSwapChainImageIndex];
-		swapChainImageBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-		swapChainImageBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-		cmdList.list->ResourceBarrier(1, &swapChainImageBarrier);
+		uint currentSwapChainImageIndex = dx12.swapChain->GetCurrentBackBufferIndex();
+		D3D12_RESOURCE_BARRIER textureBarriers[2] = {};
+		ID3D12Resource* textures[2] = { dx12.outputTexture.texture, dx12.swapChainImages[currentSwapChainImageIndex] };
+		D3D12_RESOURCE_STATES textureStates[2][2] = {
+			{D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE},
+			{D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET }
+		};
+		for (int i = 0; i < countof(textureBarriers); i += 1) {
+			textureBarriers[i].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+			textureBarriers[i].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+			textureBarriers[i].Transition.pResource = textures[i];
+			textureBarriers[i].Transition.StateBefore = textureStates[i][0];
+			textureBarriers[i].Transition.StateAfter = textureStates[i][1];
+		}
+		cmdList.list->ResourceBarrier(countof(textureBarriers), textureBarriers);
 
 		DX12Descriptor swapChainDescriptor = dx12.appendDescriptorRTV(dx12.swapChainImages[currentSwapChainImageIndex]);
 		cmdList.list->OMSetRenderTargets(1, &swapChainDescriptor.cpuHandle, false, nullptr);
@@ -530,11 +573,10 @@ void graphicsCommands() {
 		cmdList.list->RSSetScissorRects(1, &scissor);
 
 		cmdList.list->SetPipelineState(dx12.swapChainPipelineState);
-		cmdList.list->SetDescriptorHeaps(1, &dx12.cbvSrvUavDescriptorHeaps[dx12.currentFrame].heap);
-		cmdList.list->SetGraphicsRootSignature(dx12.swapChainRootSignature);
-		DX12Descriptor colorTextureDescriptor = dx12.appendDescriptorSRVTexture(dx12.colorTexture.texture);
-		cmdList.list->SetGraphicsRootDescriptorTable(0, colorTextureDescriptor.gpuHandle);
 		cmdList.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		cmdList.list->SetGraphicsRootSignature(dx12.swapChainRootSignature);
+		DX12Descriptor outputDescriptor = dx12.appendDescriptorSRVTexture(dx12.outputTexture.texture);
+		cmdList.list->SetGraphicsRootDescriptorTable(0, outputDescriptor.gpuHandle);
 		cmdList.list->DrawInstanced(3, 1, 0, 0);
 
 		ImGui::Render();
@@ -555,8 +597,8 @@ void graphicsCommands() {
 		cmdList.list->IASetIndexBuffer(&imguiIndexBufferView);
 		cmdList.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-		dx12Assert(imguiVertexBuffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&imguiVertexBuffer.bufferPtr)));
-		dx12Assert(imguiIndexBuffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&imguiIndexBuffer.bufferPtr)));
+		dx12Assert(imguiVertexBuffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&imguiVertexBuffer.mappedPtr)));
+		dx12Assert(imguiIndexBuffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&imguiIndexBuffer.mappedPtr)));
 		uint64 imguiVertexBufferOffset = 0;
 		uint64 imguiIndexBufferOffset = 0;
 		const ImDrawData* imguiDrawData = ImGui::GetDrawData();
@@ -564,8 +606,8 @@ void graphicsCommands() {
 			const ImDrawList& dlist = *imguiDrawData->CmdLists[i];
 			uint64 verticesSize = dlist.VtxBuffer.Size * sizeof(ImDrawVert);
 			uint64 indicesSize = dlist.IdxBuffer.Size * sizeof(ImDrawIdx);
-			memcpy(imguiVertexBuffer.bufferPtr + imguiVertexBufferOffset, dlist.VtxBuffer.Data, verticesSize);
-			memcpy(imguiIndexBuffer.bufferPtr + imguiIndexBufferOffset, dlist.IdxBuffer.Data, indicesSize);
+			memcpy(imguiVertexBuffer.mappedPtr + imguiVertexBufferOffset, dlist.VtxBuffer.Data, verticesSize);
+			memcpy(imguiIndexBuffer.mappedPtr + imguiIndexBufferOffset, dlist.IdxBuffer.Data, indicesSize);
 			uint64 vertexIndex = imguiVertexBufferOffset / sizeof(ImDrawVert);
 			uint64 indiceIndex = imguiIndexBufferOffset / sizeof(ImDrawIdx);
 			for (int i = 0; i < dlist.CmdBuffer.Size; i += 1) {
@@ -586,16 +628,32 @@ void graphicsCommands() {
 		imguiVertexBuffer.buffer->Unmap(0, nullptr);
 		imguiIndexBuffer.buffer->Unmap(0, nullptr);
 
-		swapChainImageBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-		swapChainImageBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-		cmdList.list->ResourceBarrier(1, &swapChainImageBarrier);
+		for (int i = 0; i < countof(textureBarriers); i += 1) {
+			textureBarriers[i].Transition.StateBefore = textureStates[i][1];
+			textureBarriers[i].Transition.StateAfter = textureStates[i][0];
+		}
+		cmdList.list->ResourceBarrier(countof(textureBarriers), textureBarriers);
 	}
 
-	dx12.unmapConstantBuffer();
+	dx12.unmapFrameDataBuffer();
 	dx12.closeAndExecuteCommandList(dx12.graphicsCommandLists[dx12.currentFrame]);
-	dx12Assert(dx12.swapChain->Present(0, 0));
-	dx12.currentFrame = (dx12.currentFrame + 1) % dx12.maxFrameInFlight;
+	HRESULT presentResult = dx12.swapChain->Present(0, 0);
+	if (presentResult != S_OK) {
+		if (presentResult == DXGI_STATUS_OCCLUDED) {
+			OutputDebugStringA("SwapChain Present: DXGI_STATUS_OCCLUDED");
+		}
+		else if (presentResult == DXGI_STATUS_MODE_CHANGED) {
+			OutputDebugStringA("SwapChain Present: DXGI_STATUS_MODE_CHANGED");
+		}
+		else if (presentResult == DXGI_STATUS_MODE_CHANGE_IN_PROGRESS) {
+			OutputDebugStringA("SwapChain Present: DXGI_STATUS_MODE_CHANGE_IN_PROGRESS");
+		}
+		else {
+			assert(false && "swapChain Present Error");
+		}
+	}
 	dx12.totalFrame += 1;
+	dx12.currentFrame = (dx12.currentFrame + 1) % dx12.maxFrameInFlight;
 	if (dx12.totalFrame >= dx12.maxFrameInFlight) {
 		dx12.waitAndResetCommandList(dx12.graphicsCommandLists[dx12.currentFrame]);
 	}
@@ -603,6 +661,7 @@ void graphicsCommands() {
 
 struct SettingInfo {
 	enum Type {
+		FullScreen,
 		Scene,
 		EndOfFile
 	};
@@ -610,6 +669,7 @@ struct SettingInfo {
 	Type type;
 	std::string_view name;
 	std::string_view path;
+	int fullScreen;
 };
 
 struct SettingParser : public Parser {
@@ -619,7 +679,12 @@ struct SettingParser : public Parser {
 		Token token;
 		getToken(token);
 		if (token.type == Token::Identifier) {
-			if (token.str == "Scene") {
+			if (token.str == "FullScreen") {
+				info.type = SettingInfo::FullScreen;
+				getToken(token);
+				token.toInt(info.fullScreen);
+			}
+			else if (token.str == "Scene") {
 				info.type = SettingInfo::Scene;
 				getToken(token);
 				if (token.type != Token::String) {
@@ -647,6 +712,7 @@ struct SettingParser : public Parser {
 
 void saveSettings() {
 	std::string settingsFileStr;
+	settingsFileStr += "FullScreen: "s + (fullScreen ? "1\r\n" : "0\r\n");
 	for (auto& scene : scenes) {
 		scene.writeToFile();
 		settingsFileStr += "Scene: \"" + scene.name + "\" \"" + scene.filePath.string() + "\"\r\n";
@@ -664,13 +730,17 @@ int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
 
 	window = Window(processWindowMsg);
 	dx12 = DX12Context(window, std::any_of(cmdLineArgs.begin(), cmdLineArgs.end(), [](auto& args) { return args == L"-d3dDebug"; }));
+	window.show();
 
 	if (fileExists(settingsFilePath)) {
 		SettingParser parser(settingsFilePath);
 		SettingInfo info;
 		while (true) {
 			parser.getInfo(info);
-			if (info.type == SettingInfo::Scene) {
+			if (info.type == SettingInfo::FullScreen) {
+				dx12.swapChain->SetFullscreenState(info.fullScreen, nullptr);
+			}
+			else if (info.type == SettingInfo::Scene) {
 				addScene(std::string(info.name), info.path);
 			}
 			else if (info.type == SettingInfo::EndOfFile) {
@@ -681,8 +751,6 @@ int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
 			}
 		}
 	}
-
-	window.show();
 
 	while (!quit) {
 		updateFrameTime();

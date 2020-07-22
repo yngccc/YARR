@@ -21,9 +21,6 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="main.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="thirdparty\include\imgui\imgui_draw.cpp">
       <Filter>Source Files\imgui</Filter>
     </ClCompile>
@@ -36,20 +33,11 @@
     <ClCompile Include="thirdparty\include\imgui\imgui_demo.cpp">
       <Filter>Source Files\imgui</Filter>
     </ClCompile>
+    <ClCompile Include="src\main.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="dx12.h">
-      <Filter>Source Files</Filter>
-    </ClInclude>
-    <ClInclude Include="miscs.h">
-      <Filter>Source Files</Filter>
-    </ClInclude>
-    <ClInclude Include="scene.h">
-      <Filter>Source Files</Filter>
-    </ClInclude>
-    <ClInclude Include="test.h">
-      <Filter>Source Files</Filter>
-    </ClInclude>
     <ClInclude Include="thirdparty\include\imgui\imconfig.h">
       <Filter>Source Files\imgui</Filter>
     </ClInclude>
@@ -58,6 +46,18 @@
     </ClInclude>
     <ClInclude Include="thirdparty\include\imgui\imgui_internal.h">
       <Filter>Source Files\imgui</Filter>
+    </ClInclude>
+    <ClInclude Include="src\dx12.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\miscs.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\scene.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\test.h">
+      <Filter>Source Files</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
@@ -82,11 +82,17 @@
     <FxCompile Include="hlsl\primaryRay.hlsl">
       <Filter>Source Files\hlsl</Filter>
     </FxCompile>
+    <FxCompile Include="hlsl\directLightRay.hlsl">
+      <Filter>Source Files\hlsl</Filter>
+    </FxCompile>
   </ItemGroup>
   <ItemGroup>
-    <None Include="hlsl\miscs.hlsl">
+    <None Include="packages.config" />
+    <None Include="hlsl\utils.hlsli">
       <Filter>Source Files\hlsl</Filter>
     </None>
-    <None Include="packages.config" />
+    <None Include="hlsl\sceneStructs.hlsli">
+      <Filter>Source Files\hlsl</Filter>
+    </None>
   </ItemGroup>
 </Project>

@@ -2,16 +2,16 @@
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_WRITE_IMPLEMENTATION
-#include "thirdparty/include/stb_image.h"
-#include "thirdparty/include/stb_image_write.h"
+#include "../thirdparty/include/stb_image.h"
+#include "../thirdparty/include/stb_image_write.h"
 
 #define TINYGLTF_IMPLEMENTATION
 #define TINYGLTF_NO_INCLUDE_STB_IMAGE
 #define TINYGLTF_NO_INCLUDE_STB_IMAGE_WRITE
-#include "thirdparty/include/tiny_gltf.h"
+#include "../thirdparty/include/tiny_gltf.h"
 
 #define TINYOBJLOADER_IMPLEMENTATION
-#include "thirdparty/include/tiny_obj_loader.h"
+#include "../thirdparty/include/tiny_obj_loader.h"
 
 #include "fbxsdk.h"
 #undef snprintf
@@ -19,23 +19,25 @@
 #include "dx12.h"
 
 struct ModelVertex {
-	std::array<float, 3> position;
-	std::array<float, 3> normal;
-	std::array<float, 2> uv;
-	std::array<float, 3> tangent;
+	float position[3];
+	float normal[3];
+	float uv[2];
+	float tangent[3];
 };
 
 struct ModelPrimitive {
-	int materialIndex;
 	std::vector<ModelVertex> vertices;
-	std::vector<char> indices;
-	int indexSize;
-	ID3D12Resource* blasBuffer = nullptr;
+	std::vector<uint8> indices;
+	DX12Buffer vertexBuffer;
+	DX12Buffer indexBuffer;
+	int indexSize = 2;
+	int materialIndex = -1;
 };
 
 struct ModelMesh {
-	std::vector<ModelPrimitive> primitives;
 	std::string name;
+	std::vector<ModelPrimitive> primitives;
+	DX12Buffer blasBuffer;
 };
 
 struct ModelNode {
@@ -45,12 +47,12 @@ struct ModelNode {
 };
 
 struct ModelMaterial {
-	std::array<float, 4> baseColorFactor = {};
+	float baseColorFactor[4] = {};
 	int baseColorTextureIndex = -1;
 	int baseColorTextureSamplerIndex = -1;
 	int normalTextureIndex = -1;
 	int normalTextureSamplerIndex = -1;
-	std::array<float, 3> emissiveFactor = {};
+	float emissiveFactor[3] = {};
 	int emissiveTextureIndex = -1;
 	int emissiveTextureSamplerIndex = -1;
 	float alphaCutoff = 0.5;
@@ -65,24 +67,6 @@ struct Model {
 	std::filesystem::path filePath;
 };
 
-struct InstanceInfo {
-	DirectX::XMMATRIX transformMat;
-	int triangleOffset;
-	int triangleCount;
-	int materialIndex;
-	int padding;
-};
-
-struct TriangleInfo {
-	std::array<std::array<float, 3>, 3> normals;
-	std::array<std::array<float, 2>, 3> uvs;
-	std::array<std::array<float, 3>, 3> tangents;
-};
-
-struct MaterialInfo {
-	ModelMaterial material;
-};
-
 struct Camera {
 	DirectX::XMVECTOR position = DirectX::XMVectorSet(0, 0, 0, 0);
 	DirectX::XMVECTOR lookAt = DirectX::XMVectorSet(0, 0, 1, 0);
@@ -90,31 +74,28 @@ struct Camera {
 	float pitchAngle = 0;
 };
 
-struct Light {
-	enum Type {
-		DirectionalLight,
-		PointLight,
-		SpotLight
-	};
-	DirectX::XMVECTOR position = DirectX::XMVectorSet(0, 0, 0, 0);
-	DirectX::XMVECTOR direction = DirectX::XMVectorSet(0, 0, 1, 0);
-};
-
 struct SceneInfo {
 	enum Type {
 		Camera,
 		Model,
 		Entity,
+		DirectionalLight,
 		EndOfFile
 	};
-
 	Type type;
-	struct Camera camera;
 	std::string_view name;
 	std::string_view path;
-	std::array<float, 4> rotation;
-	std::array<float, 3> scaling;
-	std::array<float, 3> translation;
+	float rotation[4];
+	union {
+		float scaling[3];
+		float cameraPosition[3];
+		float lightDirection[3];
+	};
+	union {
+		float translation[3];
+		float cameraLookAt[3];
+		float lightColor[3];
+	};
 };
 
 struct SceneParser : public Parser {
@@ -129,18 +110,15 @@ struct SceneParser : public Parser {
 		}
 		else if (token.type == Token::Identifier) {
 			if (token.str == "Camera") {
-				float numbers[6] = {};
-				for (float& number : numbers) {
-					getToken(token);
-					token.toFloat(number);
-				}
 				info.type = SceneInfo::Camera;
-				info.camera.position = DirectX::XMVectorSet(numbers[0], numbers[1], numbers[2], 0);
-				info.camera.lookAt = DirectX::XMVectorSet(numbers[3], numbers[4], numbers[5], 0);
-				info.camera.up = DirectX::XMVectorSet(0, 1, 0, 0);
-				DirectX::XMVECTOR view = DirectX::XMVector3Normalize(DirectX::XMVectorSubtract(info.camera.lookAt, info.camera.position));
-				info.camera.pitchAngle = DirectX::XMVectorGetX(DirectX::XMVector3AngleBetweenVectors(view, DirectX::XMVectorSet(0, 1, 0, 0)));
-				info.camera.pitchAngle = static_cast<float>(M_PI_2) - info.camera.pitchAngle;
+				for (auto& p : info.cameraPosition) {
+					getToken(token);
+					token.toFloat(p);
+				}
+				for (auto& l : info.cameraLookAt) {
+					getToken(token);
+					token.toFloat(l);
+				}
 			}
 			else if (token.str == "Model") {
 				info.type = SceneInfo::Model;
@@ -168,6 +146,17 @@ struct SceneParser : public Parser {
 					token.toFloat(number);
 				}
 			}
+			else if (token.str == "DirectionalLight") {
+				info.type = SceneInfo::DirectionalLight;
+				for (auto& d : info.lightDirection) {
+					getToken(token);
+					token.toFloat(d);
+				}
+				for (auto& c : info.lightColor) {
+					getToken(token);
+					token.toFloat(c);
+				}
+			}
 			else {
 				throw Exception("SceneParser::getInfo error: unknown identifer token \"" + std::string(token.str) + "\"");
 			}
@@ -178,17 +167,23 @@ struct SceneParser : public Parser {
 	}
 };
 
+#include "../hlsl/sceneStructs.hlsli"
+
 struct Scene {
 	Camera camera;
-	std::vector<Light> lights;
 	std::unordered_map<std::string, Model> models;
+	std::vector<SceneLight> lights;
 	DX12Buffer tlasBuffer;
 	DX12Buffer instanceInfosBuffer;
+	DX12Buffer geometryInfosBuffer;
 	DX12Buffer triangleInfosBuffer;
 	DX12Buffer materialInfosBuffer;
-	uint64 instanceCount = 0;
-	uint64 triangleCount = 0;
-	uint64 materialCount = 0;
+	DX12Buffer lightsBuffer;
+	uint64 instanceInfoCount = 0;
+	uint64 geometryInfoCount = 0;
+	uint64 triangleInfoCount = 0;
+	uint64 materialInfoCount = 0;
+	uint64 lightCount = 0;
 	std::string name;
 	std::filesystem::path filePath;
 
@@ -200,7 +195,12 @@ struct Scene {
 		while (true) {
 			parser.getInfo(info);
 			if (info.type == SceneInfo::Camera) {
-				camera = info.camera;
+				camera.position = DirectX::XMVectorSet(info.cameraPosition[0], info.cameraPosition[1], info.cameraPosition[2], 0);
+				camera.lookAt = DirectX::XMVectorSet(info.cameraLookAt[0], info.cameraLookAt[1], info.cameraLookAt[2], 0);
+				camera.up = DirectX::XMVectorSet(0, 1, 0, 0);
+				DirectX::XMVECTOR view = DirectX::XMVector3Normalize(DirectX::XMVectorSubtract(camera.lookAt, camera.position));
+				camera.pitchAngle = DirectX::XMVectorGetX(DirectX::XMVector3AngleBetweenVectors(view, DirectX::XMVectorSet(0, 1, 0, 0)));
+				camera.pitchAngle = static_cast<float>(M_PI_2) - camera.pitchAngle;
 			}
 			else if (info.type == SceneInfo::Model) {
 				std::filesystem::path path = info.path;
@@ -209,19 +209,27 @@ struct Scene {
 					Model model = createModelFromGLTF(path, dx12);
 					models.insert({ std::string(info.name), model });
 				}
-				//else if (extension == ".fbx") {
-				//}
+				else if (extension == ".fbx") {
+					assert(false && "not implemented");
+				}
 				else {
 					throw Exception("unknown model file format: " + extension.string() + "\n");
 				}
 			}
 			else if (info.type == SceneInfo::Entity) {
 			}
+			else if (info.type == SceneInfo::DirectionalLight) {
+				SceneLight l;
+				l.type = DIRECTIONAL_LIGHT;
+				arrayCopy(l.direction, info.lightDirection);
+				arrayCopy(l.color, info.lightColor);
+				lights.push_back(l);
+			}
 			else if (info.type == SceneInfo::EndOfFile) {
 				break;
 			}
 			else {
-				assert(false);
+				assert(false && "unknown SceneInfo::Type");
 			}
 		}
 	}
@@ -235,6 +243,13 @@ struct Scene {
 			<< "]\n";
 		for (auto& [name, model] : models) {
 			strStream << "Model: \"" << name << "\" " << model.filePath << "\n";
+		}
+		for (auto& light : lights) {
+			if (light.type == DIRECTIONAL_LIGHT) {
+				strStream << "DirectionalLight: ["
+					<< light.direction[0] << " " << light.direction[1] << " " << light.direction[2] << "] ["
+					<< light.color[0] << " " << light.color[1] << " " << light.color[2] << "]\n";
+			}
 		}
 		writeFile(filePath, strStream.str());
 	}
@@ -286,9 +301,8 @@ struct Scene {
 		for (auto& gltfMesh : gltfModel.meshes) {
 			ModelMesh modelMesh;
 			modelMesh.name = gltfMesh.name;
+
 			modelMesh.primitives.reserve(gltfMesh.primitives.size());
-			std::vector<std::array<DX12Buffer, 3>> scratchBuffers;
-			scratchBuffers.reserve(gltfMesh.primitives.size());
 			for (auto& gltfPrimitive : gltfMesh.primitives) {
 				ModelPrimitive modelPrimitive;
 				modelPrimitive.materialIndex = gltfPrimitive.material;
@@ -362,76 +376,73 @@ struct Scene {
 
 				modelPrimitive.vertices.resize(positionAccessor.count);
 				for (uint64 i = 0; i < positionAccessor.count; i += 1) {
-					memcpy(modelPrimitive.vertices[i].position.data(), positionData + i * 12, 12);
-					memcpy(modelPrimitive.vertices[i].normal.data(), normalData + i * 12, 12);
+					memcpy(modelPrimitive.vertices[i].position, positionData + i * 12, 12);
+					memcpy(modelPrimitive.vertices[i].normal, normalData + i * 12, 12);
 					if (uvData) {
-						memcpy(modelPrimitive.vertices[i].uv.data(), uvData + i * 8, 8);
+						memcpy(modelPrimitive.vertices[i].uv, uvData + i * 8, 8);
 					}
 					if (tangentData) {
-						memcpy(modelPrimitive.vertices[i].tangent.data(), tangentData + i * 16, 12);
+						memcpy(modelPrimitive.vertices[i].tangent, tangentData + i * 16, 12);
 					}
 				}
 				modelPrimitive.indices.resize(indexAccessor.count * modelPrimitive.indexSize);
 				memcpy(modelPrimitive.indices.data(), indexData, indexAccessor.count * modelPrimitive.indexSize);
 
-				DX12Buffer vertexPositionsBuffer = dx12.createBuffer(modelPrimitive.vertices.size() * 12, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
-				DX12Buffer indicesBuffer = dx12.createBuffer(modelPrimitive.indices.size(), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
-				char* vertexPositionsBufferPtr = nullptr;
-				char* indicesBufferPtr = nullptr;
-				dx12Assert(vertexPositionsBuffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&vertexPositionsBufferPtr)));
-				dx12Assert(indicesBuffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&indicesBufferPtr)));
-				for (auto& vertex : modelPrimitive.vertices) {
-					memcpy(vertexPositionsBufferPtr, vertex.position.data(), 12);
-					vertexPositionsBufferPtr += 12;
-				}
-				memcpy(indicesBufferPtr, modelPrimitive.indices.data(), modelPrimitive.indices.size());
-				vertexPositionsBuffer.buffer->Unmap(0, nullptr);
-				indicesBuffer.buffer->Unmap(0, nullptr);
+				modelPrimitive.vertexBuffer = dx12.createBuffer(modelPrimitive.vertices.size() * sizeof(ModelVertex), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+				modelPrimitive.indexBuffer = dx12.createBuffer(modelPrimitive.indices.size(), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+				uint8* vertexBufferPtr = nullptr;
+				uint8* indexBufferPtr = nullptr;
+				dx12Assert(modelPrimitive.vertexBuffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&vertexBufferPtr)));
+				dx12Assert(modelPrimitive.indexBuffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&indexBufferPtr)));
+				memcpy(vertexBufferPtr, modelPrimitive.vertices.data(), modelPrimitive.vertices.size() * sizeof(ModelVertex));
+				memcpy(indexBufferPtr, modelPrimitive.indices.data(), modelPrimitive.indices.size());
+				modelPrimitive.vertexBuffer.buffer->Unmap(0, nullptr);
+				modelPrimitive.indexBuffer.buffer->Unmap(0, nullptr);
 
-				D3D12_RAYTRACING_GEOMETRY_DESC meshGeometryDesc = {};
-				meshGeometryDesc.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-				if (gltfModel.materials[gltfPrimitive.material].alphaMode == "OPAQUE") {
-					meshGeometryDesc.Flags |= D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
-				}
-				meshGeometryDesc.Triangles.IndexFormat = (modelPrimitive.indexSize == 2) ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT;
-				meshGeometryDesc.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
-				meshGeometryDesc.Triangles.IndexCount = static_cast<UINT>(modelPrimitive.indices.size() / modelPrimitive.indexSize);
-				meshGeometryDesc.Triangles.VertexCount = static_cast<UINT>(modelPrimitive.vertices.size());
-				meshGeometryDesc.Triangles.IndexBuffer = indicesBuffer.buffer->GetGPUVirtualAddress();
-				meshGeometryDesc.Triangles.VertexBuffer = { vertexPositionsBuffer.buffer->GetGPUVirtualAddress(), 12 };
-
-				D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS blasInput = {};
-				blasInput.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
-				blasInput.NumDescs = 1;
-				blasInput.pGeometryDescs = &meshGeometryDesc;
-
-				D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO blasPrebuildInfo;
-				dx12.device->GetRaytracingAccelerationStructurePrebuildInfo(&blasInput, &blasPrebuildInfo);
-
-				DX12Buffer blasScratchBuffer = dx12.createBuffer(blasPrebuildInfo.ScratchDataSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
-				DX12Buffer blasBuffer = dx12.createBuffer(blasPrebuildInfo.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
-				blasBuffer.buffer->SetName(L"bottomAccelerationStructureBuffer");
-
-				D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC blasDesc = {};
-				blasDesc.DestAccelerationStructureData = blasBuffer.buffer->GetGPUVirtualAddress();
-				blasDesc.Inputs = blasInput;
-				blasDesc.ScratchAccelerationStructureData = blasScratchBuffer.buffer->GetGPUVirtualAddress();
-
-				DX12CommandList& cmdList = dx12.graphicsCommandLists[dx12.currentFrame];
-				cmdList.list->BuildRaytracingAccelerationStructure(&blasDesc, 0, nullptr);
-
-				modelPrimitive.blasBuffer = blasBuffer.buffer;
-
-				scratchBuffers.push_back({ vertexPositionsBuffer, indicesBuffer, blasScratchBuffer });
 				modelMesh.primitives.push_back(std::move(modelPrimitive));
 			}
+
+			std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> primitiveGeometryDescs;
+			primitiveGeometryDescs.reserve(modelMesh.primitives.size());
+			for (auto& primitive : modelMesh.primitives) {
+				D3D12_RAYTRACING_GEOMETRY_DESC primitiveGeometryDesc = {};
+				primitiveGeometryDesc.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+				if (gltfModel.materials[primitive.materialIndex].alphaMode == "OPAQUE") {
+					primitiveGeometryDesc.Flags |= D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+				}
+				primitiveGeometryDesc.Triangles.IndexFormat = (primitive.indexSize == 2) ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT;
+				primitiveGeometryDesc.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+				primitiveGeometryDesc.Triangles.IndexCount = static_cast<UINT>(primitive.indices.size() / primitive.indexSize);
+				primitiveGeometryDesc.Triangles.VertexCount = static_cast<UINT>(primitive.vertices.size());
+				primitiveGeometryDesc.Triangles.IndexBuffer = primitive.indexBuffer.buffer->GetGPUVirtualAddress();
+				primitiveGeometryDesc.Triangles.VertexBuffer = { primitive.vertexBuffer.buffer->GetGPUVirtualAddress(), sizeof(ModelVertex) };
+				primitiveGeometryDescs.push_back(primitiveGeometryDesc);
+			}
+
+			D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS blasInput = {};
+			blasInput.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+			blasInput.NumDescs = primitiveGeometryDescs.size();
+			blasInput.pGeometryDescs = primitiveGeometryDescs.data();
+
+			D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO blasPrebuildInfo;
+			dx12.device->GetRaytracingAccelerationStructurePrebuildInfo(&blasInput, &blasPrebuildInfo);
+
+			DX12Buffer blasScratchBuffer = dx12.createBuffer(blasPrebuildInfo.ScratchDataSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+			modelMesh.blasBuffer = dx12.createBuffer(blasPrebuildInfo.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
+			modelMesh.blasBuffer.buffer->SetName(L"bottomAccelerationStructureBuffer");
+
+			D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC blasDesc = {};
+			blasDesc.DestAccelerationStructureData = modelMesh.blasBuffer.buffer->GetGPUVirtualAddress();
+			blasDesc.Inputs = blasInput;
+			blasDesc.ScratchAccelerationStructureData = blasScratchBuffer.buffer->GetGPUVirtualAddress();
+
+			DX12CommandList& cmdList = dx12.graphicsCommandLists[dx12.currentFrame];
+			cmdList.list->BuildRaytracingAccelerationStructure(&blasDesc, 0, nullptr);
+
 			dx12.closeAndExecuteCommandList(dx12.graphicsCommandLists[dx12.currentFrame]);
 			dx12.waitAndResetCommandList(dx12.graphicsCommandLists[dx12.currentFrame]);
-			for (auto& buffers : scratchBuffers) {
-				for (auto& buffer : buffers) {
-					buffer.buffer->Release();
-				}
-			}
+			blasScratchBuffer.buffer->Release();
+
 			model.meshes.push_back(std::move(modelMesh));
 		}
 		model.materials.reserve(gltfModel.materials.size());
@@ -506,72 +517,78 @@ struct Scene {
 		if (instanceInfosBuffer.buffer) {
 			instanceInfosBuffer.buffer->Release();
 		}
+		if (geometryInfosBuffer.buffer) {
+			geometryInfosBuffer.buffer->Release();
+		}
 		if (triangleInfosBuffer.buffer) {
 			triangleInfosBuffer.buffer->Release();
 		}
 		if (materialInfosBuffer.buffer) {
 			materialInfosBuffer.buffer->Release();
 		}
+		if (lightsBuffer.buffer) {
+			lightsBuffer.buffer->Release();
+		}
 
-		struct PrimitiveInfo {
-			int triangleOffset;
-			int triangleCount;
-			int materialOffset;
-		};
-		std::vector<std::vector<std::vector<PrimitiveInfo>>> primitiveInfos;
+		std::vector<std::vector<std::vector<int>>> primitiveIndices;
+		std::vector<GeometryInfo> geometryInfos;
 		std::vector<TriangleInfo> triangleInfos;
 		std::vector<MaterialInfo> materialInfos;
-		int imageCount = 0;
+		int primitiveCount = 0;
+		int textureCount = 0;
 		for (auto& [modelName, model] : models) {
-			std::vector<std::vector<PrimitiveInfo>> modelPrimitiveInfos;
+			std::vector<std::vector<int>> modelPrimitiveIndices;
 			for (auto& mesh : model.meshes) {
-				std::vector<PrimitiveInfo> meshPrimitiveInfos;
+				std::vector<int> meshPrimitiveIndices;
 				for (auto& primitive : mesh.primitives) {
-					uint64 triangleCount = primitive.indices.size() / primitive.indexSize / 3;
-					PrimitiveInfo primitiveInfo = { static_cast<int>(triangleInfos.size()), static_cast<int>(triangleCount), static_cast<int>(materialInfos.size()) };
-					meshPrimitiveInfos.push_back(primitiveInfo);
+					meshPrimitiveIndices.push_back(primitiveCount);
+					primitiveCount += 1;
+					GeometryInfo geometryInfo;
+					geometryInfo.triangleOffset = static_cast<int>(triangleInfos.size());
+					geometryInfo.materialIndex = primitive.materialIndex >= 0 ? static_cast<int>(materialInfos.size()) + primitive.materialIndex : -1;
+					geometryInfos.push_back(geometryInfo);
 					for (uint64 indexIndex = 0; indexIndex < primitive.indices.size() / primitive.indexSize; indexIndex += 3) {
 						TriangleInfo triangleInfo = {};
 						for (uint64 triangleIndex = 0; triangleIndex < 3; triangleIndex += 1) {
-							char* indexPtr = &primitive.indices[(indexIndex + triangleIndex) * primitive.indexSize];
-							uint index = 0;
+							uint8* indexPtr = &primitive.indices[(indexIndex + triangleIndex) * primitive.indexSize];
+							uint32 index = 0;
 							if (primitive.indexSize == 2) {
 								index = *reinterpret_cast<uint16*>(indexPtr);
 							}
 							else {
-								index = *reinterpret_cast<uint*>(indexPtr);
+								index = *reinterpret_cast<uint32*>(indexPtr);
 							}
 							ModelVertex& vertex = primitive.vertices[index];
-							triangleInfo.normals[triangleIndex] = vertex.normal;
-							triangleInfo.uvs[triangleIndex] = vertex.uv;
-							triangleInfo.tangents[triangleIndex] = vertex.tangent;
+							arrayCopy(triangleInfo.normals[triangleIndex], vertex.normal);
+							arrayCopy(triangleInfo.uvs[triangleIndex], vertex.uv);
+							arrayCopy(triangleInfo.tangents[triangleIndex], vertex.tangent);
 						}
 						triangleInfos.push_back(triangleInfo);
 					}
 				}
-				modelPrimitiveInfos.push_back(std::move(meshPrimitiveInfos));
+				modelPrimitiveIndices.push_back(std::move(meshPrimitiveIndices));
 			}
-			primitiveInfos.push_back(std::move(modelPrimitiveInfos));
+			primitiveIndices.push_back(std::move(modelPrimitiveIndices));
 			for (auto& material : model.materials) {
 				MaterialInfo materialInfo = { material };
 				if (material.baseColorTextureIndex >= 0) {
-					materialInfo.material.baseColorTextureIndex = imageCount + material.baseColorTextureIndex;
+					materialInfo.material.baseColorTextureIndex = textureCount + material.baseColorTextureIndex;
 					materialInfo.material.baseColorTextureSamplerIndex = material.baseColorTextureSamplerIndex;
 				}
 				if (material.normalTextureIndex >= 0) {
-					materialInfo.material.normalTextureIndex = imageCount + material.normalTextureIndex;
+					materialInfo.material.normalTextureIndex = textureCount + material.normalTextureIndex;
 					materialInfo.material.normalTextureSamplerIndex = material.normalTextureSamplerIndex;
 				}
 				if (material.emissiveTextureIndex >= 0) {
-					materialInfo.material.emissiveTextureIndex = imageCount + material.emissiveTextureIndex;
+					materialInfo.material.emissiveTextureIndex = textureCount + material.emissiveTextureIndex;
 					materialInfo.material.emissiveTextureSamplerIndex = material.emissiveTextureSamplerIndex;
 				}
 				materialInfos.push_back(materialInfo);
 			}
-			imageCount += static_cast<int>(model.textures.size());
+			textureCount += static_cast<int>(model.textures.size());
 		}
-		std::vector<D3D12_RAYTRACING_INSTANCE_DESC> tlasInstanceDescs;
 		std::vector<InstanceInfo> instanceInfos;
+		std::vector<D3D12_RAYTRACING_INSTANCE_DESC> tlasInstanceDescs;
 		int modelIndex = 0;
 		for (auto& [modelName, model] : models) {
 			std::stack<std::pair<int, DirectX::XMMATRIX>> nodeStack;
@@ -584,21 +601,15 @@ struct Scene {
 				ModelNode* modelNode = &model.nodes[node.first];
 				if (modelNode->meshIndex >= 0) {
 					ModelMesh& mesh = model.meshes[modelNode->meshIndex];
-					for (int primitiveIndex = 0; primitiveIndex < mesh.primitives.size(); primitiveIndex += 1) {
-						ModelPrimitive& primitive = mesh.primitives[primitiveIndex];
-						D3D12_RAYTRACING_INSTANCE_DESC instanceDesc = {};
-						DirectX::XMStoreFloat3x4(reinterpret_cast<DirectX::XMFLOAT3X4*>(instanceDesc.Transform), node.second);
-						instanceDesc.InstanceMask = 0xff;
-						instanceDesc.AccelerationStructure = primitive.blasBuffer->GetGPUVirtualAddress();
-						tlasInstanceDescs.push_back(instanceDesc);
-						InstanceInfo instanceInfo = {};
-						instanceInfo.transformMat = node.second;
-						PrimitiveInfo& primitiveInfo = primitiveInfos[modelIndex][modelNode->meshIndex][primitiveIndex];
-						instanceInfo.triangleOffset = primitiveInfo.triangleOffset;
-						instanceInfo.triangleCount = primitiveInfo.triangleCount;
-						instanceInfo.materialIndex = primitiveInfo.materialOffset + primitive.materialIndex;
-						instanceInfos.push_back(instanceInfo);
-					}
+					D3D12_RAYTRACING_INSTANCE_DESC instanceDesc = {};
+					DirectX::XMStoreFloat3x4(reinterpret_cast<DirectX::XMFLOAT3X4*>(instanceDesc.Transform), node.second);
+					instanceDesc.InstanceMask = 0xff;
+					instanceDesc.AccelerationStructure = mesh.blasBuffer.buffer->GetGPUVirtualAddress();
+					tlasInstanceDescs.push_back(instanceDesc);
+					InstanceInfo instanceInfo = {};
+					instanceInfo.transformMat = node.second;
+					instanceInfo.geometryOffset = primitiveIndices[modelIndex][modelNode->meshIndex][0];
+					instanceInfos.push_back(instanceInfo);
 				}
 				for (int childIndex : modelNode->children) {
 					DirectX::XMMATRIX childTransform = XMMatrixMultiply(node.second, model.nodes[childIndex].transform);
@@ -608,32 +619,52 @@ struct Scene {
 			modelIndex += 1;
 		}
 
-		instanceCount = instanceInfos.size();
-		triangleCount = triangleInfos.size();
-		materialCount = materialInfos.size();
-		instanceInfosBuffer = dx12.createBuffer(instanceInfos.size() * sizeof(InstanceInfo), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
-		triangleInfosBuffer = dx12.createBuffer(triangleInfos.size() * sizeof(TriangleInfo), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
-		materialInfosBuffer = dx12.createBuffer(materialInfos.size() * sizeof(MaterialInfo), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+		instanceInfoCount = instanceInfos.size();
+		instanceInfosBuffer = dx12.createBuffer(instanceInfos.size() * sizeof(instanceInfos[0]), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
 		instanceInfosBuffer.buffer->SetName(L"instanceInfosBuffer");
-		triangleInfosBuffer.buffer->SetName(L"triangleInfosBuffer");
-		materialInfosBuffer.buffer->SetName(L"materialInfosBuffer");
 		void* instanceInfosBufferPtr = nullptr;
-		void* triangleInfosBufferPtr = nullptr;
-		void* materialInfosBufferPtr = nullptr;
 		instanceInfosBuffer.buffer->Map(0, nullptr, &instanceInfosBufferPtr);
-		triangleInfosBuffer.buffer->Map(0, nullptr, &triangleInfosBufferPtr);
-		materialInfosBuffer.buffer->Map(0, nullptr, &materialInfosBufferPtr);
-		memcpy(instanceInfosBufferPtr, instanceInfos.data(), instanceInfos.size() * sizeof(InstanceInfo));
-		memcpy(triangleInfosBufferPtr, triangleInfos.data(), triangleInfos.size() * sizeof(TriangleInfo));
-		memcpy(materialInfosBufferPtr, materialInfos.data(), materialInfos.size() * sizeof(MaterialInfo));
+		memcpy(instanceInfosBufferPtr, instanceInfos.data(), instanceInfos.size() * sizeof(instanceInfos[0]));
 		instanceInfosBuffer.buffer->Unmap(0, nullptr);
+
+		geometryInfoCount = geometryInfos.size();
+		geometryInfosBuffer = dx12.createBuffer(geometryInfos.size() * sizeof(geometryInfos[0]), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+		geometryInfosBuffer.buffer->SetName(L"geometryInfosBuffer");
+		void* geometryInfosBufferPtr = nullptr;
+		geometryInfosBuffer.buffer->Map(0, nullptr, &geometryInfosBufferPtr);
+		memcpy(geometryInfosBufferPtr, geometryInfos.data(), geometryInfos.size() * sizeof(geometryInfos[0]));
+		geometryInfosBuffer.buffer->Unmap(0, nullptr);
+
+		triangleInfoCount = triangleInfos.size();
+		triangleInfosBuffer = dx12.createBuffer(triangleInfos.size() * sizeof(triangleInfos[0]), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+		triangleInfosBuffer.buffer->SetName(L"triangleInfosBuffer");
+		void* triangleInfosBufferPtr = nullptr;
+		triangleInfosBuffer.buffer->Map(0, nullptr, &triangleInfosBufferPtr);
+		memcpy(triangleInfosBufferPtr, triangleInfos.data(), triangleInfos.size() * sizeof(triangleInfos[0]));
 		triangleInfosBuffer.buffer->Unmap(0, nullptr);
+
+		materialInfoCount = materialInfos.size();
+		materialInfosBuffer = dx12.createBuffer(materialInfos.size() * sizeof(materialInfos[0]), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+		materialInfosBuffer.buffer->SetName(L"materialInfosBuffer");
+		void* materialInfosBufferPtr = nullptr;
+		materialInfosBuffer.buffer->Map(0, nullptr, &materialInfosBufferPtr);
+		memcpy(materialInfosBufferPtr, materialInfos.data(), materialInfos.size() * sizeof(materialInfos[0]));
 		materialInfosBuffer.buffer->Unmap(0, nullptr);
 
-		DX12Buffer tlasInstanceDescsBuffer = dx12.createBuffer(tlasInstanceDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+		lightCount = lights.size();
+		if (lightCount > 0) {
+			lightsBuffer = dx12.createBuffer(lights.size() * sizeof(lights[0]), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+			lightsBuffer.buffer->SetName(L"lightsBuffer");
+			void* lightsBufferPtr = nullptr;
+			lightsBuffer.buffer->Map(0, nullptr, &lightsBufferPtr);
+			memcpy(lightsBufferPtr, lights.data(), lights.size() * sizeof(lights[0]));
+			lightsBuffer.buffer->Unmap(0, nullptr);
+		}
+
+		DX12Buffer tlasInstanceDescsBuffer = dx12.createBuffer(tlasInstanceDescs.size() * sizeof(tlasInstanceDescs[0]), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
 		void* instanceDescsBuffer = nullptr;
 		tlasInstanceDescsBuffer.buffer->Map(0, nullptr, &instanceDescsBuffer);
-		memcpy(instanceDescsBuffer, tlasInstanceDescs.data(), tlasInstanceDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC));
+		memcpy(instanceDescsBuffer, tlasInstanceDescs.data(), tlasInstanceDescs.size() * sizeof(tlasInstanceDescs[0]));
 		tlasInstanceDescsBuffer.buffer->Unmap(0, nullptr);
 
 		D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS tlasInputs = {};

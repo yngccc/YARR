@@ -28,7 +28,7 @@
 
 struct DX12CommandList {
 	ID3D12CommandAllocator* allocator;
-	ID3D12GraphicsCommandList4* list;
+	ID3D12GraphicsCommandList6* list;
 	ID3D12Fence* fence;
 	uint64 fenceValue;
 	HANDLE fenceEvent;
@@ -50,7 +50,7 @@ struct DX12DescriptorHeap {
 
 struct DX12Buffer {
 	ID3D12Resource* buffer = nullptr;
-	char* bufferPtr = nullptr;
+	uint8* mappedPtr = nullptr;
 	uint64 size = 0;
 	uint64 capacity = 0;
 };
@@ -70,13 +70,14 @@ struct DX12TextureCopy {
 struct DX12Context {
 	ID3D12Device5* device;
 	IDXGIAdapter1* adapter;
+	IDXGIOutput* output;
 	ID3D12Debug1* debugController;
 	ID3D12Debug2* debugController2;
 	IDXGIDebug* dxgiDebug;
 	IDXGIInfoQueue* dxgiInfoQueue;
 	IDXGIFactory6* dxgiFactory;
 
-	static const uint64 maxFrameInFlight = 2;
+	static constexpr uint64 maxFrameInFlight = 2;
 	uint64 totalFrame = 0;
 	uint64 currentFrame = 0;
 
@@ -95,14 +96,20 @@ struct DX12Context {
 	IDXGISwapChain4* swapChain;
 	ID3D12Resource* swapChainImages[3];
 
-	DX12Buffer constantsBuffers[maxFrameInFlight];
+	DX12Buffer frameDataBuffers[maxFrameInFlight];
 	DX12Buffer imguiVertexBuffers[maxFrameInFlight];
 	DX12Buffer imguiIndexBuffers[maxFrameInFlight];
 
+	static constexpr std::pair<uint, uint> renderScales[5] = { {1, 2}, {3, 4}, {1, 1}, {3, 2}, {2, 1} };
+	uint currentRenderScale = 2;
+	uint renderResolutionX = 0;
+	uint renderResolutionY = 0;
+
 	DX12Texture positionTexture;
 	DX12Texture normalTexture;
-	DX12Texture colorTexture;
+	DX12Texture baseColorTexture;
 	DX12Texture emissiveTexture;
+	DX12Texture outputTexture;
 	DX12Texture imguiTexture;
 
 	ID3D12RootSignature* swapChainRootSignature = nullptr;
@@ -111,11 +118,11 @@ struct DX12Context {
 	ID3D12RootSignature* imguiRootSignature = nullptr;
 	ID3D12PipelineState* imguiPipelineState = nullptr;
 
+	static constexpr uint64 shaderTableRecordSize = 64;
 	ID3D12StateObject* primaryRayStateObject = nullptr;
 	ID3D12StateObjectProperties* primaryRayObjectProps = nullptr;
-	DX12Buffer primaryRayShaderTableBuffers[maxFrameInFlight];
-
-	uint64 rayTracingShaderRecordSize;
+	ID3D12StateObject* directLightRayStateObject = nullptr;
+	ID3D12StateObjectProperties* directLightRayObjectProps = nullptr;
 
 	DX12Context() = default;
 	DX12Context(const Window& window, bool debug) {
@@ -123,7 +130,7 @@ struct DX12Context {
 			UINT factoryFlags = 0;
 			if (debug) {
 				factoryFlags = DXGI_CREATE_FACTORY_DEBUG;
-				
+
 				dx12Assert(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController)));
 				dx12Assert(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController2)));
 				debugController->EnableDebugLayer();
@@ -139,8 +146,10 @@ struct DX12Context {
 			}
 			dx12Assert(CreateDXGIFactory2(factoryFlags, IID_PPV_ARGS(&dxgiFactory)));
 			dx12Assert(dxgiFactory->EnumAdapterByGpuPreference(0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&adapter)));
+			dx12Assert(adapter->EnumOutputs(0, &output));
 			dx12Assert(D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&device)));
-
+		}
+		{
 			D3D12_FEATURE_DATA_D3D12_OPTIONS5 features = {};
 			dx12Assert(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &features, sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS5)));
 			assert(features.RaytracingTier >= D3D12_RAYTRACING_TIER_1_0 && "D3D12 error: RaytracingTier < D3D12_RAYTRACING_TIER_1_0");
@@ -189,9 +198,10 @@ struct DX12Context {
 			swapChainDesc.Height = window.height;
 			swapChainDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
 			swapChainDesc.SampleDesc.Count = 1;
-			swapChainDesc.BufferUsage = DXGI_USAGE_BACK_BUFFER | DXGI_USAGE_RENDER_TARGET_OUTPUT;
+			swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
 			swapChainDesc.BufferCount = countof<UINT>(swapChainImages);
 			swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+			swapChainDesc.Flags = 0; /*DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;*/
 			dx12Assert(dxgiFactory->CreateSwapChainForHwnd(graphicsCommandQueue, window.handle, &swapChainDesc, nullptr, nullptr, reinterpret_cast<IDXGISwapChain1**>(&swapChain)));
 			for (int i = 0; i < countof(swapChainImages); i += 1) {
 				swapChain->GetBuffer(i, IID_PPV_ARGS(&swapChainImages[i]));
@@ -231,22 +241,27 @@ struct DX12Context {
 			cbvSrvUavDescriptorHeaps[i].descriptorSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 		}
 		for (int i = 0; i < maxFrameInFlight; i += 1) {
-			constantsBuffers[i] = createBuffer(megabytes(32), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
-			constantsBuffers[i].buffer->SetName(L"constantsBuffer");
+			frameDataBuffers[i] = createBuffer(megabytes(32), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+			frameDataBuffers[i].buffer->SetName(L"frameDataBuffer");
 			imguiVertexBuffers[i] = createBuffer(megabytes(1), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
 			imguiVertexBuffers[i].buffer->SetName(L"imguiVertexBuffer");
 			imguiIndexBuffers[i] = createBuffer(megabytes(1), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
 			imguiIndexBuffers[i].buffer->SetName(L"imguiIndexBuffer");
 		}
 		{
-			positionTexture = createTexture(window.width, window.height, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			renderResolutionX = window.width * renderScales[currentRenderScale].first / renderScales[currentRenderScale].second;
+			renderResolutionY = window.height * renderScales[currentRenderScale].first / renderScales[currentRenderScale].second;
+
+			positionTexture = createTexture(renderResolutionX, renderResolutionY, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 			positionTexture.texture->SetName(L"positionTexture");
-			normalTexture = createTexture(window.width, window.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			normalTexture = createTexture(renderResolutionX, renderResolutionY, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 			normalTexture.texture->SetName(L"normalTexture");
-			colorTexture = createTexture(window.width, window.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-			colorTexture.texture->SetName(L"colorTexture");
-			emissiveTexture = createTexture(window.width, window.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			baseColorTexture = createTexture(renderResolutionX, renderResolutionY, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+			baseColorTexture.texture->SetName(L"baseColorTexture");
+			emissiveTexture = createTexture(renderResolutionX, renderResolutionY, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 			emissiveTexture.texture->SetName(L"emissiveTexture");
+			outputTexture = createTexture(renderResolutionX, renderResolutionY, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+			outputTexture.texture->SetName(L"outputTexture");
 
 			ImGuiIO& io = ImGui::GetIO();
 			ImFont* imFont = io.Fonts->AddFontDefault();
@@ -268,18 +283,21 @@ struct DX12Context {
 		static auto imguiVSWriteTime = std::filesystem::last_write_time("imguiVS.cso");
 		static auto imguiPSWriteTime = std::filesystem::last_write_time("imguiPS.cso");
 		static auto primaryRayWriteTime = std::filesystem::last_write_time("primaryRay.cso");
+		static auto directLightRayWriteTime = std::filesystem::last_write_time("directLightRay.cso");
 
 		auto curSwapChainVSWriteTime = std::filesystem::last_write_time("swapChainVS.cso");
 		auto curSwapChainPSWriteTime = std::filesystem::last_write_time("swapChainPS.cso");
 		auto curImguiVSWriteTime = std::filesystem::last_write_time("imguiVS.cso");
 		auto curImguiPSWriteTime = std::filesystem::last_write_time("imguiPS.cso");
 		auto curPrimaryRayWriteTime = std::filesystem::last_write_time("primaryRay.cso");
+		auto curDirectLightRayWriteTime = std::filesystem::last_write_time("directLightRay.cso");
 
 		bool compileSwapChainShaders = curSwapChainVSWriteTime > swapChainVSWriteTime || curSwapChainPSWriteTime > swapChainPSWriteTime;
 		bool compileImguiShaders = curImguiVSWriteTime > imguiVSWriteTime || curImguiPSWriteTime > imguiPSWriteTime;
 		bool compilePrimaryRayShader = curPrimaryRayWriteTime > primaryRayWriteTime;
-		
-		if (forceCompile || compileSwapChainShaders || compileImguiShaders || compilePrimaryRayShader) {
+		bool compileDirectLightRayShader = curDirectLightRayWriteTime > directLightRayWriteTime;
+
+		if (forceCompile || compileSwapChainShaders || compileImguiShaders || compilePrimaryRayShader || compileDirectLightRayShader) {
 			drainGraphicsCommandQueue();
 		}
 		if (forceCompile || compileSwapChainShaders) {
@@ -360,7 +378,7 @@ struct DX12Context {
 			D3D12_STATE_SUBOBJECT stateSubobjects[6] = {};
 
 			std::vector<char> bytecode = readFile("primaryRay.cso");
-			D3D12_EXPORT_DESC exportDescs[] = { {L"primaryRayGen"}, {L"primaryRayClosestHit"}, {L"primaryRayAnyHit"}, {L"primaryRayMiss"} };
+			D3D12_EXPORT_DESC exportDescs[] = { {L"rayGen"}, {L"closestHit"}, {L"anyHit"}, {L"miss"} };
 			D3D12_DXIL_LIBRARY_DESC dxilLibDesc = {};
 			dxilLibDesc.DXILLibrary.pShaderBytecode = bytecode.data();
 			dxilLibDesc.DXILLibrary.BytecodeLength = bytecode.size();
@@ -369,19 +387,19 @@ struct DX12Context {
 			stateSubobjects[0] = { D3D12_STATE_SUBOBJECT_TYPE_DXIL_LIBRARY, &dxilLibDesc };
 
 			D3D12_DESCRIPTOR_RANGE descriptorRange[4] = {};
-			descriptorRange[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+			descriptorRange[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
 			descriptorRange[0].OffsetInDescriptorsFromTableStart = 0;
-			descriptorRange[0].NumDescriptors = 4;
-			descriptorRange[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
-			descriptorRange[1].OffsetInDescriptorsFromTableStart = 4;
-			descriptorRange[1].NumDescriptors = 1;
+			descriptorRange[0].NumDescriptors = 1;
+			descriptorRange[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+			descriptorRange[1].OffsetInDescriptorsFromTableStart = 1;
+			descriptorRange[1].NumDescriptors = 4;
 			descriptorRange[2].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
 			descriptorRange[2].OffsetInDescriptorsFromTableStart = 5;
-			descriptorRange[2].NumDescriptors = 4;
+			descriptorRange[2].NumDescriptors = 5;
 			descriptorRange[3].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-			descriptorRange[3].OffsetInDescriptorsFromTableStart = 9;
+			descriptorRange[3].OffsetInDescriptorsFromTableStart = 10;
 			descriptorRange[3].NumDescriptors = UINT_MAX;
-			descriptorRange[3].BaseShaderRegister = 4;
+			descriptorRange[3].BaseShaderRegister = 5;
 
 			D3D12_ROOT_PARAMETER rootParams[1] = {};
 			rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -408,7 +426,7 @@ struct DX12Context {
 			rootSigBlob->Release();
 			stateSubobjects[1] = { D3D12_STATE_SUBOBJECT_TYPE_LOCAL_ROOT_SIGNATURE, &rootSig };
 
-			const wchar_t* exportNames[] = { L"primaryRayGen", L"primaryRayClosestHit", L"primaryRayAnyHit", L"primaryRayMiss", };
+			const wchar_t* exportNames[] = { L"rayGen", L"closestHit", L"anyHit", L"miss", };
 			D3D12_SUBOBJECT_TO_EXPORTS_ASSOCIATION association0 = {};
 			association0.NumExports = countof<UINT>(exportNames);
 			association0.pExports = exportNames;
@@ -416,10 +434,10 @@ struct DX12Context {
 			stateSubobjects[2] = { D3D12_STATE_SUBOBJECT_TYPE_SUBOBJECT_TO_EXPORTS_ASSOCIATION, &association0 };
 
 			D3D12_HIT_GROUP_DESC hitGroupDesc = {};
-			hitGroupDesc.HitGroupExport = L"primaryRayHitGroup";
+			hitGroupDesc.HitGroupExport = L"hitGroup";
 			hitGroupDesc.Type = D3D12_HIT_GROUP_TYPE_TRIANGLES;
-			hitGroupDesc.AnyHitShaderImport = L"primaryRayAnyHit";
-			hitGroupDesc.ClosestHitShaderImport = L"primaryRayClosestHit";
+			hitGroupDesc.AnyHitShaderImport = L"anyHit";
+			hitGroupDesc.ClosestHitShaderImport = L"closestHit";
 			stateSubobjects[3] = { D3D12_STATE_SUBOBJECT_TYPE_HIT_GROUP, &hitGroupDesc };
 
 			D3D12_RAYTRACING_PIPELINE_CONFIG pipelineConfig = {};
@@ -437,12 +455,84 @@ struct DX12Context {
 			stateObjectDesc.pSubobjects = stateSubobjects;
 			dx12Assert(device->CreateStateObject(&stateObjectDesc, IID_PPV_ARGS(&primaryRayStateObject)));
 			dx12Assert(primaryRayStateObject->QueryInterface(IID_PPV_ARGS(&primaryRayObjectProps)));
-
-			rayTracingShaderRecordSize = align(D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES + 32, D3D12_RAYTRACING_SHADER_RECORD_BYTE_ALIGNMENT);
-			for (int i = 0; i < maxFrameInFlight; i += 1) {
-				primaryRayShaderTableBuffers[i] = createBuffer(3 * rayTracingShaderRecordSize, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
-				primaryRayShaderTableBuffers[i].buffer->SetName(L"primaryRayShaderTable");
+		}
+		if (forceCompile || compileDirectLightRayShader) {
+			if (directLightRayStateObject) {
+				directLightRayStateObject->Release();
 			}
+			if (directLightRayObjectProps) {
+				directLightRayObjectProps->Release();
+			}
+			directLightRayWriteTime = curDirectLightRayWriteTime;
+
+			D3D12_STATE_SUBOBJECT stateSubobjects[6] = {};
+
+			std::vector<char> bytecode = readFile("directLightRay.cso");
+			D3D12_EXPORT_DESC exportDescs[] = { {L"rayGen"}, {L"closestHit"}, {L"anyHit"}, {L"miss"} };
+			D3D12_DXIL_LIBRARY_DESC dxilLibDesc = {};
+			dxilLibDesc.DXILLibrary.pShaderBytecode = bytecode.data();
+			dxilLibDesc.DXILLibrary.BytecodeLength = bytecode.size();
+			dxilLibDesc.NumExports = countof<UINT>(exportDescs);
+			dxilLibDesc.pExports = exportDescs;
+			stateSubobjects[0] = { D3D12_STATE_SUBOBJECT_TYPE_DXIL_LIBRARY, &dxilLibDesc };
+
+			D3D12_DESCRIPTOR_RANGE descriptorRange[3] = {};
+			descriptorRange[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+			descriptorRange[0].OffsetInDescriptorsFromTableStart = 0;
+			descriptorRange[0].NumDescriptors = 1;
+			descriptorRange[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+			descriptorRange[1].OffsetInDescriptorsFromTableStart = 1;
+			descriptorRange[1].NumDescriptors = 4;
+			descriptorRange[2].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+			descriptorRange[2].OffsetInDescriptorsFromTableStart = 5;
+			descriptorRange[2].NumDescriptors = 2;
+
+			D3D12_ROOT_PARAMETER rootParams[1] = {};
+			rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+			rootParams[0].DescriptorTable.NumDescriptorRanges = countof<UINT>(descriptorRange);
+			rootParams[0].DescriptorTable.pDescriptorRanges = descriptorRange;
+
+			D3D12_ROOT_SIGNATURE_DESC rootSigDesc = {};
+			rootSigDesc.NumParameters = countof<UINT>(rootParams);
+			rootSigDesc.pParameters = rootParams;
+			rootSigDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_LOCAL_ROOT_SIGNATURE;
+			ID3D12RootSignature* rootSig = nullptr;
+			ID3DBlob* rootSigBlob = nullptr;
+			ID3DBlob* rootSigError = nullptr;
+			dx12Assert(D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1, &rootSigBlob, &rootSigError));
+			dx12Assert(device->CreateRootSignature(0, rootSigBlob->GetBufferPointer(), rootSigBlob->GetBufferSize(), IID_PPV_ARGS(&rootSig)));
+			rootSigBlob->Release();
+			stateSubobjects[1] = { D3D12_STATE_SUBOBJECT_TYPE_LOCAL_ROOT_SIGNATURE, &rootSig };
+
+			const wchar_t* exportNames[] = { L"rayGen", L"closestHit", L"anyHit", L"miss", };
+			D3D12_SUBOBJECT_TO_EXPORTS_ASSOCIATION association0 = {};
+			association0.NumExports = countof<UINT>(exportNames);
+			association0.pExports = exportNames;
+			association0.pSubobjectToAssociate = &stateSubobjects[1];
+			stateSubobjects[2] = { D3D12_STATE_SUBOBJECT_TYPE_SUBOBJECT_TO_EXPORTS_ASSOCIATION, &association0 };
+
+			D3D12_HIT_GROUP_DESC hitGroupDesc = {};
+			hitGroupDesc.HitGroupExport = L"hitGroup";
+			hitGroupDesc.Type = D3D12_HIT_GROUP_TYPE_TRIANGLES;
+			hitGroupDesc.AnyHitShaderImport = L"anyHit";
+			hitGroupDesc.ClosestHitShaderImport = L"closestHit";
+			stateSubobjects[3] = { D3D12_STATE_SUBOBJECT_TYPE_HIT_GROUP, &hitGroupDesc };
+
+			D3D12_RAYTRACING_PIPELINE_CONFIG pipelineConfig = {};
+			pipelineConfig.MaxTraceRecursionDepth = 1;
+			stateSubobjects[4] = { D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_PIPELINE_CONFIG, &pipelineConfig };
+
+			D3D12_RAYTRACING_SHADER_CONFIG shaderConfig = {};
+			shaderConfig.MaxPayloadSizeInBytes = 48;
+			shaderConfig.MaxAttributeSizeInBytes = 8;
+			stateSubobjects[5] = { D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_SHADER_CONFIG, &shaderConfig };
+
+			D3D12_STATE_OBJECT_DESC stateObjectDesc = {};
+			stateObjectDesc.Type = D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE;
+			stateObjectDesc.NumSubobjects = countof<UINT>(stateSubobjects);
+			stateObjectDesc.pSubobjects = stateSubobjects;
+			dx12Assert(device->CreateStateObject(&stateObjectDesc, IID_PPV_ARGS(&directLightRayStateObject)));
+			dx12Assert(directLightRayStateObject->QueryInterface(IID_PPV_ARGS(&directLightRayObjectProps)));
 		}
 	}
 	DX12Buffer createBuffer(uint64 capacity, D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_FLAGS resourceFlags, D3D12_RESOURCE_STATES resourceState) const {
@@ -558,21 +648,21 @@ struct DX12Context {
 		}
 		stageBuffers.resize(0);
 	}
-	uint64 appendConstantBuffer(void* data, uint64 dataSize) {
-		DX12Buffer& buffer = constantsBuffers[currentFrame];
-		uint64 alignedSize = align(buffer.size, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+	void resetAndMapFrameDataBuffer() {
+		DX12Buffer& buffer = frameDataBuffers[currentFrame];
+		buffer.size = 0;
+		dx12Assert(buffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&frameDataBuffers[currentFrame].mappedPtr)));
+	}
+	uint64 appendFrameDataBuffer(void* data, uint64 dataSize, uint64 alignment) {
+		DX12Buffer& buffer = frameDataBuffers[currentFrame];
+		uint64 alignedSize = align(buffer.size, alignment);
 		assert(alignedSize + dataSize < buffer.capacity);
-		memcpy(buffer.bufferPtr + alignedSize, data, dataSize);
+		memcpy(buffer.mappedPtr + alignedSize, data, dataSize);
 		buffer.size = alignedSize + dataSize;
 		return alignedSize;
 	}
-	void resetAndMapConstantBuffer() {
-		DX12Buffer& buffer = constantsBuffers[currentFrame];
-		buffer.size = 0;
-		dx12Assert(buffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&constantsBuffers[currentFrame].bufferPtr)));
-	}
-	void unmapConstantBuffer() {
-		constantsBuffers[currentFrame].buffer->Unmap(0, nullptr);
+	void unmapFrameDataBuffer() {
+		frameDataBuffers[currentFrame].buffer->Unmap(0, nullptr);
 	}
 	void resetDescriptorHeaps() {
 		rtvDescriptorHeaps[currentFrame].size = 0;
@@ -591,8 +681,8 @@ struct DX12Context {
 		DX12DescriptorHeap& heap = cbvSrvUavDescriptorHeaps[currentFrame];
 		assert(heap.size < heap.capacity && "D3D12 error: appendCBV exceeded heap capacity");
 		DX12Descriptor descriptor = { {heap.cpuHandle.ptr + heap.descriptorSize * heap.size}, {heap.gpuHandle.ptr + heap.descriptorSize * heap.size} };
-		uint64 alignedSize = align(size, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
-		D3D12_CONSTANT_BUFFER_VIEW_DESC desc = { resource->GetGPUVirtualAddress() + offset, static_cast<uint>(alignedSize) };
+		size = align(size, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+		D3D12_CONSTANT_BUFFER_VIEW_DESC desc = { resource->GetGPUVirtualAddress() + offset, static_cast<uint>(size) };
 		device->CreateConstantBufferView(&desc, descriptor.cpuHandle);
 		heap.size += 1;
 		return descriptor;
@@ -652,7 +742,7 @@ struct DX12Context {
 		dx12Assert(cmdList.allocator->Reset());
 		dx12Assert(cmdList.list->Reset(cmdList.allocator, nullptr));
 	}
-	void drainGraphicsCommandQueue() const {
+	void drainGraphicsCommandQueue() {
 		static uint64 signalValue = 0;
 		signalValue += 1;
 		dx12Assert(graphicsCommandQueueFence->SetEventOnCompletion(signalValue, graphicsCommandQueueFenceEvent));
@@ -660,7 +750,7 @@ struct DX12Context {
 		DWORD waitResult = WaitForSingleObject(graphicsCommandQueueFenceEvent, INFINITE);
 		assert(waitResult == WAIT_OBJECT_0 && "WaitForSingleObject error");
 	}
-	void resizeSwapChain(int width, int height) {
+	void resizeSwapChainBuffers(uint width, uint height) {
 		drainGraphicsCommandQueue();
 		for (int i = 0; i < countof(swapChainImages); i += 1) {
 			swapChainImages[i]->Release();
@@ -670,17 +760,23 @@ struct DX12Context {
 			swapChain->GetBuffer(i, IID_PPV_ARGS(&swapChainImages[i]));
 			swapChainImages[i]->SetName(L"swapChain");
 		}
+
+		renderResolutionX = width * renderScales[currentRenderScale].first / renderScales[currentRenderScale].second;
+		renderResolutionY = height * renderScales[currentRenderScale].first / renderScales[currentRenderScale].second;
 		positionTexture.texture->Release();
-		normalTexture.texture->Release();
-		colorTexture.texture->Release();
-		emissiveTexture.texture->Release();
-		positionTexture = createTexture(width, height, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-		normalTexture = createTexture(width, height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-		colorTexture = createTexture(width, height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-		emissiveTexture = createTexture(width, height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+		positionTexture = createTexture(renderResolutionX, renderResolutionY, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 		positionTexture.texture->SetName(L"positionTexture");
+		normalTexture.texture->Release();
+		normalTexture = createTexture(renderResolutionX, renderResolutionY, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 		normalTexture.texture->SetName(L"normalTexture");
-		colorTexture.texture->SetName(L"colorTexture");
+		baseColorTexture.texture->Release();
+		baseColorTexture = createTexture(renderResolutionX, renderResolutionY, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+		baseColorTexture.texture->SetName(L"baseColorTexture");
+		emissiveTexture.texture->Release();
+		emissiveTexture = createTexture(renderResolutionX, renderResolutionY, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 		emissiveTexture.texture->SetName(L"emissiveTexture");
+		outputTexture.texture->Release();
+		outputTexture = createTexture(renderResolutionX, renderResolutionY, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+		outputTexture.texture->SetName(L"outputTexture");
 	}
 };
