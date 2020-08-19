@@ -15,14 +15,14 @@
 #define USE_PIX
 #include "pix3.h"
 
-#define dx12Assert(dx12Call) \
+#define d3dAssert(d3dCall) \
 { \
-	HRESULT dx12CallResult = dx12Call; \
-	if (dx12CallResult != S_OK) { \
+	HRESULT d3dCallResult = d3dCall; \
+	if (d3dCallResult != S_OK) { \
 		char error[256] = "D3D12 error: "; \
-		FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, dx12CallResult, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), error + 13, 256 - 13, nullptr); \
+		FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, d3dCallResult, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), error + 13, 256 - 13, nullptr); \
 		OutputDebugStringA(error); \
-        assert(false && #dx12Call); \
+        assert(false && #d3dCall); \
 	} \
 }
 
@@ -77,7 +77,7 @@ struct DX12Context {
 	IDXGIInfoQueue* dxgiInfoQueue;
 	IDXGIFactory6* dxgiFactory;
 
-	static constexpr uint64 maxFrameInFlight = 2;
+	static constexpr uint64 maxFrameInFlight = 3;
 	uint64 totalFrame = 0;
 	uint64 currentFrame = 0;
 
@@ -94,13 +94,13 @@ struct DX12Context {
 	DX12DescriptorHeap cbvSrvUavDescriptorHeaps[maxFrameInFlight];
 
 	IDXGISwapChain4* swapChain;
-	ID3D12Resource* swapChainImages[3];
+	ID3D12Resource* swapChainImages[maxFrameInFlight];
 
 	DX12Buffer frameDataBuffers[maxFrameInFlight];
 	DX12Buffer imguiVertexBuffers[maxFrameInFlight];
 	DX12Buffer imguiIndexBuffers[maxFrameInFlight];
 
-	static constexpr std::pair<uint, uint> renderScales[5] = { {1, 2}, {3, 4}, {1, 1}, {3, 2}, {2, 1} };
+	static constexpr struct { uint num, denom; } renderScales[5] = { {1, 2}, {3, 4}, {1, 1}, {3, 2}, {2, 1} };
 	uint currentRenderScale = 2;
 	uint renderResolutionX = 0;
 	uint renderResolutionY = 0;
@@ -123,6 +123,9 @@ struct DX12Context {
 	ID3D12StateObjectProperties* primaryRayObjectProps = nullptr;
 	ID3D12StateObject* directLightRayStateObject = nullptr;
 	ID3D12StateObjectProperties* directLightRayObjectProps = nullptr;
+	ID3D12StateObject* probeRayStateObject = nullptr;
+	ID3D12StateObjectProperties* probeRayObjectProps = nullptr;
+
 
 	DX12Context() = default;
 	DX12Context(const Window& window, bool debug) {
@@ -131,27 +134,27 @@ struct DX12Context {
 			if (debug) {
 				factoryFlags = DXGI_CREATE_FACTORY_DEBUG;
 
-				dx12Assert(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController)));
-				dx12Assert(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController2)));
+				d3dAssert(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController)));
+				d3dAssert(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController2)));
 				debugController->EnableDebugLayer();
 				debugController->SetEnableGPUBasedValidation(true);
 				debugController->SetEnableSynchronizedCommandQueueValidation(true);
 				debugController2->SetGPUBasedValidationFlags(D3D12_GPU_BASED_VALIDATION_FLAGS_NONE);
 
-				dx12Assert(DXGIGetDebugInterface1(0, IID_PPV_ARGS(&dxgiDebug)));
-				dx12Assert(DXGIGetDebugInterface1(0, IID_PPV_ARGS(&dxgiInfoQueue)));
-				dx12Assert(dxgiInfoQueue->SetBreakOnSeverity(DXGI_DEBUG_ALL, DXGI_INFO_QUEUE_MESSAGE_SEVERITY_CORRUPTION, true));
-				dx12Assert(dxgiInfoQueue->SetBreakOnSeverity(DXGI_DEBUG_ALL, DXGI_INFO_QUEUE_MESSAGE_SEVERITY_ERROR, true));
-				dx12Assert(dxgiInfoQueue->SetBreakOnSeverity(DXGI_DEBUG_ALL, DXGI_INFO_QUEUE_MESSAGE_SEVERITY_WARNING, true));
+				d3dAssert(DXGIGetDebugInterface1(0, IID_PPV_ARGS(&dxgiDebug)));
+				d3dAssert(DXGIGetDebugInterface1(0, IID_PPV_ARGS(&dxgiInfoQueue)));
+				d3dAssert(dxgiInfoQueue->SetBreakOnSeverity(DXGI_DEBUG_ALL, DXGI_INFO_QUEUE_MESSAGE_SEVERITY_CORRUPTION, true));
+				d3dAssert(dxgiInfoQueue->SetBreakOnSeverity(DXGI_DEBUG_ALL, DXGI_INFO_QUEUE_MESSAGE_SEVERITY_ERROR, true));
+				d3dAssert(dxgiInfoQueue->SetBreakOnSeverity(DXGI_DEBUG_ALL, DXGI_INFO_QUEUE_MESSAGE_SEVERITY_WARNING, true));
 			}
-			dx12Assert(CreateDXGIFactory2(factoryFlags, IID_PPV_ARGS(&dxgiFactory)));
-			dx12Assert(dxgiFactory->EnumAdapterByGpuPreference(0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&adapter)));
-			dx12Assert(adapter->EnumOutputs(0, &output));
-			dx12Assert(D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&device)));
+			d3dAssert(CreateDXGIFactory2(factoryFlags, IID_PPV_ARGS(&dxgiFactory)));
+			d3dAssert(dxgiFactory->EnumAdapterByGpuPreference(0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&adapter)));
+			d3dAssert(adapter->EnumOutputs(0, &output));
+			d3dAssert(D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&device)));
 		}
 		{
 			D3D12_FEATURE_DATA_D3D12_OPTIONS5 features = {};
-			dx12Assert(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &features, sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS5)));
+			d3dAssert(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &features, sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS5)));
 			assert(features.RaytracingTier >= D3D12_RAYTRACING_TIER_1_0 && "D3D12 error: RaytracingTier < D3D12_RAYTRACING_TIER_1_0");
 
 			//D3D12_FEATURE_DATA_D3D12_OPTIONS7 featureData = {};
@@ -165,29 +168,29 @@ struct DX12Context {
 			D3D12_COMMAND_QUEUE_DESC queueDesc = {};
 			queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
 			queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-			dx12Assert(device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&graphicsCommandQueue)));
-			dx12Assert(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&graphicsCommandQueueFence)));
+			d3dAssert(device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&graphicsCommandQueue)));
+			d3dAssert(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&graphicsCommandQueueFence)));
 			graphicsCommandQueueFenceEvent = CreateEventA(nullptr, false, false, nullptr);
 			assert(graphicsCommandQueueFenceEvent && "D3D12 error: CreateEvent failed to create graphicsCommandQueueFenceEvent");
 
 			queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
 			queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-			dx12Assert(device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&copyCommandQueue)));
+			d3dAssert(device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&copyCommandQueue)));
 
 			for (auto& list : graphicsCommandLists) {
-				dx12Assert(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&list.allocator)));
-				dx12Assert(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, list.allocator, nullptr, IID_PPV_ARGS(&list.list)));
+				d3dAssert(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&list.allocator)));
+				d3dAssert(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, list.allocator, nullptr, IID_PPV_ARGS(&list.list)));
 
-				dx12Assert(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&list.fence)));
+				d3dAssert(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&list.fence)));
 				list.fenceValue = 0;
 				list.fenceEvent = CreateEventA(nullptr, false, false, nullptr);
 				assert(list.fenceEvent && "D3D12 error: CreateEvent failed to create graphicsCommandList");
 			}
 
-			dx12Assert(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&copyCommandList.allocator)));
-			dx12Assert(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, copyCommandList.allocator, nullptr, IID_PPV_ARGS(&copyCommandList.list)));
+			d3dAssert(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&copyCommandList.allocator)));
+			d3dAssert(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, copyCommandList.allocator, nullptr, IID_PPV_ARGS(&copyCommandList.list)));
 
-			dx12Assert(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&copyCommandList.fence)));
+			d3dAssert(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&copyCommandList.fence)));
 			copyCommandList.fenceValue = 0;
 			copyCommandList.fenceEvent = CreateEventA(nullptr, false, false, nullptr);
 			assert(copyCommandList.fenceEvent && "D3D12 error: CreateEvent failed to create graphicsCommandList");
@@ -201,8 +204,8 @@ struct DX12Context {
 			swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
 			swapChainDesc.BufferCount = countof<UINT>(swapChainImages);
 			swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-			swapChainDesc.Flags = 0; /*DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;*/
-			dx12Assert(dxgiFactory->CreateSwapChainForHwnd(graphicsCommandQueue, window.handle, &swapChainDesc, nullptr, nullptr, reinterpret_cast<IDXGISwapChain1**>(&swapChain)));
+			swapChainDesc.Flags = 0;
+			d3dAssert(dxgiFactory->CreateSwapChainForHwnd(graphicsCommandQueue, window.handle, &swapChainDesc, nullptr, nullptr, reinterpret_cast<IDXGISwapChain1**>(&swapChain)));
 			for (int i = 0; i < countof(swapChainImages); i += 1) {
 				swapChain->GetBuffer(i, IID_PPV_ARGS(&swapChainImages[i]));
 				swapChainImages[i]->SetName(L"swapChain");
@@ -213,7 +216,7 @@ struct DX12Context {
 			heapDesc.NumDescriptors = 16;
 			heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
 			heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-			dx12Assert(device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&rtvDescriptorHeaps[i].heap)));
+			d3dAssert(device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&rtvDescriptorHeaps[i].heap)));
 			rtvDescriptorHeaps[i].cpuHandle = rtvDescriptorHeaps[i].heap->GetCPUDescriptorHandleForHeapStart();
 			rtvDescriptorHeaps[i].gpuHandle = rtvDescriptorHeaps[i].heap->GetGPUDescriptorHandleForHeapStart();
 			rtvDescriptorHeaps[i].size = 0;
@@ -223,7 +226,7 @@ struct DX12Context {
 			heapDesc.NumDescriptors = 4;
 			heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
 			heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-			dx12Assert(device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&dsvDescriptorHeaps[i].heap)));
+			d3dAssert(device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&dsvDescriptorHeaps[i].heap)));
 			dsvDescriptorHeaps[i].cpuHandle = dsvDescriptorHeaps[i].heap->GetCPUDescriptorHandleForHeapStart();
 			dsvDescriptorHeaps[i].gpuHandle = dsvDescriptorHeaps[i].heap->GetGPUDescriptorHandleForHeapStart();
 			dsvDescriptorHeaps[i].size = 0;
@@ -233,7 +236,7 @@ struct DX12Context {
 			heapDesc.NumDescriptors = 10000;
 			heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 			heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-			dx12Assert(device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&cbvSrvUavDescriptorHeaps[i].heap)));
+			d3dAssert(device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&cbvSrvUavDescriptorHeaps[i].heap)));
 			cbvSrvUavDescriptorHeaps[i].cpuHandle = cbvSrvUavDescriptorHeaps[i].heap->GetCPUDescriptorHandleForHeapStart();
 			cbvSrvUavDescriptorHeaps[i].gpuHandle = cbvSrvUavDescriptorHeaps[i].heap->GetGPUDescriptorHandleForHeapStart();
 			cbvSrvUavDescriptorHeaps[i].size = 0;
@@ -249,8 +252,8 @@ struct DX12Context {
 			imguiIndexBuffers[i].buffer->SetName(L"imguiIndexBuffer");
 		}
 		{
-			renderResolutionX = window.width * renderScales[currentRenderScale].first / renderScales[currentRenderScale].second;
-			renderResolutionY = window.height * renderScales[currentRenderScale].first / renderScales[currentRenderScale].second;
+			renderResolutionX = window.width * renderScales[currentRenderScale].num / renderScales[currentRenderScale].denom;
+			renderResolutionY = window.height * renderScales[currentRenderScale].num / renderScales[currentRenderScale].denom;
 
 			positionTexture = createTexture(renderResolutionX, renderResolutionY, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 			positionTexture.texture->SetName(L"positionTexture");
@@ -284,6 +287,7 @@ struct DX12Context {
 		static auto imguiPSWriteTime = std::filesystem::last_write_time("imguiPS.cso");
 		static auto primaryRayWriteTime = std::filesystem::last_write_time("primaryRay.cso");
 		static auto directLightRayWriteTime = std::filesystem::last_write_time("directLightRay.cso");
+		static auto probeRayWriteTime = std::filesystem::last_write_time("probeRay.cso");
 
 		auto curSwapChainVSWriteTime = std::filesystem::last_write_time("swapChainVS.cso");
 		auto curSwapChainPSWriteTime = std::filesystem::last_write_time("swapChainPS.cso");
@@ -291,13 +295,15 @@ struct DX12Context {
 		auto curImguiPSWriteTime = std::filesystem::last_write_time("imguiPS.cso");
 		auto curPrimaryRayWriteTime = std::filesystem::last_write_time("primaryRay.cso");
 		auto curDirectLightRayWriteTime = std::filesystem::last_write_time("directLightRay.cso");
+		auto curProbeRayWriteTime = std::filesystem::last_write_time("probeRay.cso");
 
 		bool compileSwapChainShaders = curSwapChainVSWriteTime > swapChainVSWriteTime || curSwapChainPSWriteTime > swapChainPSWriteTime;
 		bool compileImguiShaders = curImguiVSWriteTime > imguiVSWriteTime || curImguiPSWriteTime > imguiPSWriteTime;
 		bool compilePrimaryRayShader = curPrimaryRayWriteTime > primaryRayWriteTime;
 		bool compileDirectLightRayShader = curDirectLightRayWriteTime > directLightRayWriteTime;
+		bool compileProbeRayShader = curProbeRayWriteTime > probeRayWriteTime;
 
-		if (forceCompile || compileSwapChainShaders || compileImguiShaders || compilePrimaryRayShader || compileDirectLightRayShader) {
+		if (forceCompile || compileSwapChainShaders || compileImguiShaders || compilePrimaryRayShader || compileDirectLightRayShader || compileProbeRayShader) {
 			drainGraphicsCommandQueue();
 		}
 		if (forceCompile || compileSwapChainShaders) {
@@ -312,7 +318,7 @@ struct DX12Context {
 
 			std::vector<char> vsBytecode = readFile("swapChainVS.cso");
 			std::vector<char> psBytecode = readFile("swapChainPS.cso");
-			dx12Assert(device->CreateRootSignature(0, psBytecode.data(), psBytecode.size(), IID_PPV_ARGS(&swapChainRootSignature)));
+			d3dAssert(device->CreateRootSignature(0, psBytecode.data(), psBytecode.size(), IID_PPV_ARGS(&swapChainRootSignature)));
 			D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
 			psoDesc.VS = { vsBytecode.data(), vsBytecode.size() };
 			psoDesc.PS = { psBytecode.data(), psBytecode.size() };
@@ -324,7 +330,7 @@ struct DX12Context {
 			psoDesc.NumRenderTargets = 1;
 			psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
 			psoDesc.SampleDesc.Count = 1;
-			dx12Assert(device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&swapChainPipelineState)));
+			d3dAssert(device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&swapChainPipelineState)));
 		}
 		if (forceCompile || compileImguiShaders) {
 			if (imguiRootSignature) {
@@ -338,7 +344,7 @@ struct DX12Context {
 
 			std::vector<char> vsBytecode = readFile("imguiVS.cso");
 			std::vector<char> psBytecode = readFile("imguiPS.cso");
-			dx12Assert(device->CreateRootSignature(0, psBytecode.data(), psBytecode.size(), IID_PPV_ARGS(&imguiRootSignature)));
+			d3dAssert(device->CreateRootSignature(0, psBytecode.data(), psBytecode.size(), IID_PPV_ARGS(&imguiRootSignature)));
 			D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
 			psoDesc.VS = { vsBytecode.data(), vsBytecode.size() };
 			psoDesc.PS = { psBytecode.data(), psBytecode.size() };
@@ -364,7 +370,7 @@ struct DX12Context {
 			psoDesc.NumRenderTargets = 1;
 			psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
 			psoDesc.SampleDesc.Count = 1;
-			dx12Assert(device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&imguiPipelineState)));
+			d3dAssert(device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&imguiPipelineState)));
 		}
 		if (forceCompile || compilePrimaryRayShader) {
 			if (primaryRayStateObject) {
@@ -421,8 +427,8 @@ struct DX12Context {
 			ID3D12RootSignature* rootSig = nullptr;
 			ID3DBlob* rootSigBlob = nullptr;
 			ID3DBlob* rootSigError = nullptr;
-			dx12Assert(D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1, &rootSigBlob, &rootSigError));
-			dx12Assert(device->CreateRootSignature(0, rootSigBlob->GetBufferPointer(), rootSigBlob->GetBufferSize(), IID_PPV_ARGS(&rootSig)));
+			d3dAssert(D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1, &rootSigBlob, &rootSigError));
+			d3dAssert(device->CreateRootSignature(0, rootSigBlob->GetBufferPointer(), rootSigBlob->GetBufferSize(), IID_PPV_ARGS(&rootSig)));
 			rootSigBlob->Release();
 			stateSubobjects[1] = { D3D12_STATE_SUBOBJECT_TYPE_LOCAL_ROOT_SIGNATURE, &rootSig };
 
@@ -453,8 +459,8 @@ struct DX12Context {
 			stateObjectDesc.Type = D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE;
 			stateObjectDesc.NumSubobjects = countof<UINT>(stateSubobjects);
 			stateObjectDesc.pSubobjects = stateSubobjects;
-			dx12Assert(device->CreateStateObject(&stateObjectDesc, IID_PPV_ARGS(&primaryRayStateObject)));
-			dx12Assert(primaryRayStateObject->QueryInterface(IID_PPV_ARGS(&primaryRayObjectProps)));
+			d3dAssert(device->CreateStateObject(&stateObjectDesc, IID_PPV_ARGS(&primaryRayStateObject)));
+			d3dAssert(primaryRayStateObject->QueryInterface(IID_PPV_ARGS(&primaryRayObjectProps)));
 		}
 		if (forceCompile || compileDirectLightRayShader) {
 			if (directLightRayStateObject) {
@@ -480,12 +486,12 @@ struct DX12Context {
 			descriptorRange[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
 			descriptorRange[0].OffsetInDescriptorsFromTableStart = 0;
 			descriptorRange[0].NumDescriptors = 1;
-			descriptorRange[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+			descriptorRange[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
 			descriptorRange[1].OffsetInDescriptorsFromTableStart = 1;
-			descriptorRange[1].NumDescriptors = 4;
-			descriptorRange[2].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-			descriptorRange[2].OffsetInDescriptorsFromTableStart = 5;
-			descriptorRange[2].NumDescriptors = 2;
+			descriptorRange[1].NumDescriptors = 5;
+			descriptorRange[2].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+			descriptorRange[2].OffsetInDescriptorsFromTableStart = 6;
+			descriptorRange[2].NumDescriptors = 1;
 
 			D3D12_ROOT_PARAMETER rootParams[1] = {};
 			rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -499,8 +505,8 @@ struct DX12Context {
 			ID3D12RootSignature* rootSig = nullptr;
 			ID3DBlob* rootSigBlob = nullptr;
 			ID3DBlob* rootSigError = nullptr;
-			dx12Assert(D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1, &rootSigBlob, &rootSigError));
-			dx12Assert(device->CreateRootSignature(0, rootSigBlob->GetBufferPointer(), rootSigBlob->GetBufferSize(), IID_PPV_ARGS(&rootSig)));
+			d3dAssert(D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1, &rootSigBlob, &rootSigError));
+			d3dAssert(device->CreateRootSignature(0, rootSigBlob->GetBufferPointer(), rootSigBlob->GetBufferSize(), IID_PPV_ARGS(&rootSig)));
 			rootSigBlob->Release();
 			stateSubobjects[1] = { D3D12_STATE_SUBOBJECT_TYPE_LOCAL_ROOT_SIGNATURE, &rootSig };
 
@@ -531,26 +537,26 @@ struct DX12Context {
 			stateObjectDesc.Type = D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE;
 			stateObjectDesc.NumSubobjects = countof<UINT>(stateSubobjects);
 			stateObjectDesc.pSubobjects = stateSubobjects;
-			dx12Assert(device->CreateStateObject(&stateObjectDesc, IID_PPV_ARGS(&directLightRayStateObject)));
-			dx12Assert(directLightRayStateObject->QueryInterface(IID_PPV_ARGS(&directLightRayObjectProps)));
+			d3dAssert(device->CreateStateObject(&stateObjectDesc, IID_PPV_ARGS(&directLightRayStateObject)));
+			d3dAssert(directLightRayStateObject->QueryInterface(IID_PPV_ARGS(&directLightRayObjectProps)));
 		}
 	}
 	DX12Buffer createBuffer(uint64 capacity, D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_FLAGS resourceFlags, D3D12_RESOURCE_STATES resourceState) const {
-		D3D12_HEAP_PROPERTIES heap_prop = {};
-		heap_prop.Type = heapType;
-		D3D12_RESOURCE_DESC resource_desc = {};
-		resource_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-		resource_desc.Width = capacity;
-		resource_desc.Height = 1;
-		resource_desc.DepthOrArraySize = 1;
-		resource_desc.MipLevels = 1;
-		resource_desc.Format = DXGI_FORMAT_UNKNOWN;
-		resource_desc.SampleDesc.Count = 1;
-		resource_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-		resource_desc.Flags = resourceFlags;
+		D3D12_HEAP_PROPERTIES heapProp = {};
+		heapProp.Type = heapType;
+		D3D12_RESOURCE_DESC resourceDesc = {};
+		resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+		resourceDesc.Width = capacity;
+		resourceDesc.Height = 1;
+		resourceDesc.DepthOrArraySize = 1;
+		resourceDesc.MipLevels = 1;
+		resourceDesc.Format = DXGI_FORMAT_UNKNOWN;
+		resourceDesc.SampleDesc.Count = 1;
+		resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+		resourceDesc.Flags = resourceFlags;
 		DX12Buffer buffer;
 		buffer.capacity = capacity;
-		dx12Assert(device->CreateCommittedResource(&heap_prop, D3D12_HEAP_FLAG_NONE, &resource_desc, resourceState, nullptr, IID_PPV_ARGS(&buffer.buffer)));
+		d3dAssert(device->CreateCommittedResource(&heapProp, D3D12_HEAP_FLAG_NONE, &resourceDesc, resourceState, nullptr, IID_PPV_ARGS(&buffer.buffer)));
 		return buffer;
 	}
 	DX12Texture createTexture(uint width, uint height, uint arraySize, uint mips, DXGI_FORMAT format, D3D12_RESOURCE_FLAGS resourceFlags, D3D12_RESOURCE_STATES resourceState) const {
@@ -573,10 +579,10 @@ struct DX12Context {
 		ID3D12Resource* texture = nullptr;
 		if (resourceFlags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET || resourceFlags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) {
 			D3D12_CLEAR_VALUE clearValue = { format };
-			dx12Assert(device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, resourceState, &clearValue, IID_PPV_ARGS(&texture)));
+			d3dAssert(device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, resourceState, &clearValue, IID_PPV_ARGS(&texture)));
 		}
 		else {
-			dx12Assert(device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, resourceState, nullptr, IID_PPV_ARGS(&texture)));
+			d3dAssert(device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, resourceState, nullptr, IID_PPV_ARGS(&texture)));
 		}
 		return DX12Texture{ texture };
 	}
@@ -651,9 +657,9 @@ struct DX12Context {
 	void resetAndMapFrameDataBuffer() {
 		DX12Buffer& buffer = frameDataBuffers[currentFrame];
 		buffer.size = 0;
-		dx12Assert(buffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&frameDataBuffers[currentFrame].mappedPtr)));
+		d3dAssert(buffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&frameDataBuffers[currentFrame].mappedPtr)));
 	}
-	uint64 appendFrameDataBuffer(void* data, uint64 dataSize, uint64 alignment) {
+	uint64 appendFrameDataBuffer(const void* data, uint64 dataSize, uint64 alignment) {
 		DX12Buffer& buffer = frameDataBuffers[currentFrame];
 		uint64 alignedSize = align(buffer.size, alignment);
 		assert(alignedSize + dataSize < buffer.capacity);
@@ -730,23 +736,23 @@ struct DX12Context {
 		return descriptor;
 	}
 	void closeAndExecuteCommandList(DX12CommandList& cmdList) {
-		dx12Assert(cmdList.list->Close());
+		d3dAssert(cmdList.list->Close());
 		graphicsCommandQueue->ExecuteCommandLists(1, reinterpret_cast<ID3D12CommandList**>(&cmdList.list));
 		cmdList.fenceValue += 1;
-		dx12Assert(cmdList.fence->SetEventOnCompletion(cmdList.fenceValue, cmdList.fenceEvent));
-		dx12Assert(graphicsCommandQueue->Signal(cmdList.fence, cmdList.fenceValue));
+		d3dAssert(cmdList.fence->SetEventOnCompletion(cmdList.fenceValue, cmdList.fenceEvent));
+		d3dAssert(graphicsCommandQueue->Signal(cmdList.fence, cmdList.fenceValue));
 	}
 	void waitAndResetCommandList(DX12CommandList& cmdList) {
 		DWORD waitResult = WaitForSingleObject(cmdList.fenceEvent, INFINITE);
 		assert(waitResult == WAIT_OBJECT_0 && "WaitForSingleObject error");
-		dx12Assert(cmdList.allocator->Reset());
-		dx12Assert(cmdList.list->Reset(cmdList.allocator, nullptr));
+		d3dAssert(cmdList.allocator->Reset());
+		d3dAssert(cmdList.list->Reset(cmdList.allocator, nullptr));
 	}
 	void drainGraphicsCommandQueue() {
 		static uint64 signalValue = 0;
 		signalValue += 1;
-		dx12Assert(graphicsCommandQueueFence->SetEventOnCompletion(signalValue, graphicsCommandQueueFenceEvent));
-		dx12Assert(graphicsCommandQueue->Signal(graphicsCommandQueueFence, signalValue));
+		d3dAssert(graphicsCommandQueueFence->SetEventOnCompletion(signalValue, graphicsCommandQueueFenceEvent));
+		d3dAssert(graphicsCommandQueue->Signal(graphicsCommandQueueFence, signalValue));
 		DWORD waitResult = WaitForSingleObject(graphicsCommandQueueFenceEvent, INFINITE);
 		assert(waitResult == WAIT_OBJECT_0 && "WaitForSingleObject error");
 	}
@@ -755,14 +761,14 @@ struct DX12Context {
 		for (int i = 0; i < countof(swapChainImages); i += 1) {
 			swapChainImages[i]->Release();
 		}
-		dx12Assert(swapChain->ResizeBuffers(countof<UINT>(swapChainImages), width, height, DXGI_FORMAT_R8G8B8A8_UNORM, 0));
+		d3dAssert(swapChain->ResizeBuffers(countof<UINT>(swapChainImages), width, height, DXGI_FORMAT_R8G8B8A8_UNORM, 0));
 		for (int i = 0; i < countof(swapChainImages); i += 1) {
 			swapChain->GetBuffer(i, IID_PPV_ARGS(&swapChainImages[i]));
 			swapChainImages[i]->SetName(L"swapChain");
 		}
 
-		renderResolutionX = width * renderScales[currentRenderScale].first / renderScales[currentRenderScale].second;
-		renderResolutionY = height * renderScales[currentRenderScale].first / renderScales[currentRenderScale].second;
+		renderResolutionX = width * renderScales[currentRenderScale].num / renderScales[currentRenderScale].denom;
+		renderResolutionY = height * renderScales[currentRenderScale].num / renderScales[currentRenderScale].denom;
 		positionTexture.texture->Release();
 		positionTexture = createTexture(renderResolutionX, renderResolutionY, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 		positionTexture.texture->SetName(L"positionTexture");

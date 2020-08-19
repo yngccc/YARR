@@ -1,3 +1,15 @@
+struct SceneConstants {
+#ifdef __cplusplus
+#else
+	float4x4 screenToWorldMat;
+	float4 eyePosition;
+	int bounceCount;
+	int sampleCount;
+	int frameCount;
+	int lightCount;
+#endif
+};
+
 struct InstanceInfo {
 #ifdef __cplusplus
 	DirectX::XMMATRIX transformMat;
@@ -53,7 +65,7 @@ struct SceneLight {
 #ifdef __cplusplus
 	int type;
 	float position[3] = { 0, 0, 0 };
-	float direction[3] = { 0, 0, 1 };
+	float direction[3] = { 0, 1, 0 };
 	float color[3] = { 1, 1, 1 };
 #else
 	int type;

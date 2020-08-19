@@ -1,22 +1,15 @@
 #include "utils.hlsli"
 #include "sceneStructs.hlsli"
 
-cbuffer constants : register(b0) {
-	float4x4 screenToWorldMat;
-	float4 eyePosition;
-	int bounceCount;
-	int sampleCount;
-	int frameCount;
-	int lightCount;
-};
+ConstantBuffer<SceneConstants> constants : register(b0);
 
-RWTexture2D<float3> positionTexture : register(u0);
-RWTexture2D<float3> normalTexture : register(u1);
-RWTexture2D<float3> baseColorTexture : register(u2);
-RWTexture2D<float3> outputTexture : register(u3);
+Texture2D<float3> positionTexture : register(t0);
+Texture2D<float3> normalTexture : register(t1);
+Texture2D<float3> baseColorTexture : register(t2);
+RaytracingAccelerationStructure sceneBVH : register(t3);
+StructuredBuffer<SceneLight> lights : register(t4);
 
-RaytracingAccelerationStructure scene : register(t0);
-StructuredBuffer<SceneLight> lights : register(t1);
+RWTexture2D<float3> outputTexture : register(u0);
 
 struct RayPayload {
 	bool hit;
@@ -32,7 +25,7 @@ void rayGen() {
 
 	float3 outputColor = float3(0, 0, 0);
 
-	for (int i = 0; i < lightCount; i += 1) {
+	for (int i = 0; i < constants.lightCount; i += 1) {
 		SceneLight light = lights[i];
 		if (light.type == DIRECTIONAL_LIGHT) {
 			RayDesc rayDesc;
@@ -40,9 +33,8 @@ void rayGen() {
 			rayDesc.Direction = light.direction;
 			rayDesc.TMin = 0.001;
 			rayDesc.TMax = 500;
-			RayPayload payload;
-			payload.hit = false;
-			TraceRay(scene, RAY_FLAG_NONE, 0xff, 0, 0, 0, rayDesc, payload);
+			RayPayload payload = { false };
+			TraceRay(sceneBVH, RAY_FLAG_NONE, 0xff, 0, 0, 0, rayDesc, payload);
 			if (!payload.hit) {
 				outputColor += light.color * dot(normal, rayDesc.Direction);
 			}
@@ -50,12 +42,11 @@ void rayGen() {
 		else if (light.type == POINT_LIGHT) {
 			RayDesc rayDesc;
 			rayDesc.Origin = position;
-			rayDesc.Direction = light.position - position;
+			rayDesc.Direction = normalize(light.position - position);
 			rayDesc.TMin = 0.001;
 			rayDesc.TMax = 500;
-			RayPayload payload;
-			payload.hit = false;
-			TraceRay(scene, RAY_FLAG_NONE, 0xff, 0, 0, 0, rayDesc, payload);
+			RayPayload payload = { false };
+			TraceRay(sceneBVH, RAY_FLAG_NONE, 0xff, 0, 0, 0, rayDesc, payload);
 			if (!payload.hit) {
 				outputColor += light.color * dot(normal, rayDesc.Direction);
 			}

@@ -6,9 +6,11 @@
 #define IMGUI_DEFINE_MATH_OPERATORS
 #include "../thirdparty/include/imgui/imgui.h"
 #include "../thirdparty/include/imgui/imgui_internal.h"
+#include "../thirdparty/include/imgui/ImGuizmo.h"
 
 #include "scene.h"
 #include "test.h"
+#include "rtxgi/ddgi/DDGIVolume.h"
 
 struct Gamepad {
 	XINPUT_STATE prevState = {};
@@ -49,6 +51,10 @@ static Gamepad gamepad;
 static DX12Context dx12;
 static std::vector<Scene> scenes = {};
 static uint64 currentSceneIndex = 0;
+static rtxgi::DDGIVolume ddgiVolume("ddgiVolume");
+static rtxgi::DDGIVolumeDesc ddgiVolumeDesc;
+static rtxgi::DDGIVolumeResources ddgiVolumeResources;
+static DX12Buffer ddgiConstantBuffer;
 static const char* settingsFilePath = "settings.ini";
 static bool quit = false;
 static double frameTime = 0;
@@ -239,6 +245,9 @@ void updateCamera() {
 			camera.position = DirectX::XMVectorAdd(camera.lookAt, v);
 		}
 	}
+	camera.viewMat = DirectX::XMMatrixLookAtRH(camera.position, camera.lookAt, camera.up);
+	camera.projMat = DirectX::XMMatrixPerspectiveFovRH(DirectX::XMConvertToRadians(45), static_cast<float>(window.width) / window.height, 1, 1000);
+	camera.viewProjMat = camera.viewMat * camera.projMat;
 }
 
 void updateFrameTime() {
@@ -334,10 +343,11 @@ void imguiCommands() {
 	static ImGuiLogWindow logWindow;
 	static ImGuiMetricsWindow metricsWindow;
 
-	ImGui::GetIO().DisplaySize = { static_cast<float>(window.width), static_cast<float>(window.height) };
-	// ImGuizmo::SetRect(0, 0, static_cast<float>(window.width), static_cast<float>(window.height));
 	ImGui::GetIO().DeltaTime = static_cast<float>(frameTime);
+	ImGui::GetIO().DisplaySize = { static_cast<float>(window.width), static_cast<float>(window.height) };
+	ImGuizmo::SetRect(0, 0, static_cast<float>(window.width), static_cast<float>(window.height));
 	ImGui::NewFrame();
+	ImGuizmo::BeginFrame();
 
 	ImVec2 mainMenuBarPos;
 	ImVec2 mainMenuBarSize;
@@ -369,7 +379,6 @@ void imguiCommands() {
 			}
 			ImGui::EndMenu();
 		}
-
 		ImGui::EndMainMenuBar();
 	}
 
@@ -402,6 +411,100 @@ void imguiCommands() {
 	}
 	ImGui::End();
 	ImGui::PopStyleVar(3);
+
+	if (ImGui::Begin("Properties")) {
+		if (ImGui::BeginTabBar("PropertiesTabBar")) {
+			if (currentSceneIndex < scenes.size()) {
+				Scene& scene = scenes[currentSceneIndex];
+				DirectX::XMFLOAT4X4 imguizmoView;
+				DirectX::XMFLOAT4X4 imguizmoProj;
+				DirectX::XMStoreFloat4x4(&imguizmoView, scene.camera.viewMat);
+				DirectX::XMStoreFloat4x4(&imguizmoProj, scene.camera.projMat);
+				if (ImGui::BeginTabItem("Lights")) {
+					static int lightIndex = 0;
+					ImGui::Text("Add light: ");
+					ImGui::SameLine();
+					if (ImGui::Button("direct")) {
+						scene.lights.push_back(SceneLight{ DIRECTIONAL_LIGHT });
+						lightIndex = scene.lights.size() - 1;
+					}
+					ImGui::SameLine();
+					if (ImGui::Button("point")) {
+						scene.lights.push_back(SceneLight{ POINT_LIGHT });
+						lightIndex = scene.lights.size() - 1;
+					}
+					char str[16] = {};
+					if (!scene.lights.empty()) {
+						std::to_chars(str, str + sizeof(str), lightIndex);
+					}
+					if (ImGui::BeginCombo("lights", str)) {
+						for (int i = 0; i < scene.lights.size(); i += 1) {
+							std::to_chars(str, str + sizeof(str), i);
+							if (ImGui::Selectable(str, i == lightIndex)) {
+								lightIndex = i;
+							}
+						}
+						ImGui::EndCombo();
+					}
+					if (lightIndex >= 0 && lightIndex < scene.lights.size()) {
+						SceneLight& light = scene.lights[lightIndex];
+						bool noLight = false;
+						if (ImGui::Button("delete")) {
+							scene.lights.erase(scene.lights.begin() + lightIndex);
+							if (scene.lights.empty()) {
+								noLight = true;
+							}
+							else {
+								lightIndex = std::max(lightIndex - 1, 0);
+								light = scene.lights[lightIndex];
+							}
+						}
+						if (!noLight) {
+							if (light.type == DIRECTIONAL_LIGHT) {
+								ImGui::InputFloat3("direction", light.direction);
+								vec3Normalize(light.direction);
+								ImGui::ColorEdit3("color", light.color);
+
+								float up[3] = { 0, 1, 0 };
+								float rotation[4];
+								rotationBetweenVecs(up, light.direction, rotation);
+								DirectX::XMFLOAT4X4 imguizmoMat;
+								matFromRotation(rotation, imguizmoMat.m[0]);
+								ImGuizmo::Manipulate(imguizmoView.m[0], imguizmoProj.m[0], ImGuizmo::ROTATE, ImGuizmo::LOCAL, imguizmoMat.m[0]);
+								DirectX::XMVECTOR s, r, t;
+								DirectX::XMMatrixDecompose(&s, &r, &t, DirectX::XMLoadFloat4x4(&imguizmoMat));
+								DirectX::XMVECTOR dir = DirectX::XMVector3Normalize(DirectX::XMVector3Transform(DirectX::XMVectorSet(0, 1, 0, 0), DirectX::XMMatrixRotationQuaternion(r)));
+								light.direction[0] = DirectX::XMVectorGetX(dir);
+								light.direction[1] = DirectX::XMVectorGetY(dir);
+								light.direction[2] = DirectX::XMVectorGetZ(dir);
+							}
+							else if (light.type == POINT_LIGHT) {
+								ImGui::InputFloat3("position", light.position);
+								ImGui::ColorEdit3("color", light.color);
+
+								DirectX::XMFLOAT4X4 imguizmoMat = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, light.position[0], light.position[1], light.position[2], 1 };
+								ImGuizmo::Manipulate(imguizmoView.m[0], imguizmoProj.m[0], ImGuizmo::TRANSLATE, ImGuizmo::LOCAL, imguizmoMat.m[0]);
+								DirectX::XMVECTOR s, r, t;
+								DirectX::XMMatrixDecompose(&s, &r, &t, DirectX::XMLoadFloat4x4(&imguizmoMat));
+								light.position[0] = DirectX::XMVectorGetX(t);
+								light.position[1] = DirectX::XMVectorGetY(t);
+								light.position[2] = DirectX::XMVectorGetZ(t);
+							}
+							else {
+								ImGui::Text("UI not implemented for this light type");
+							}
+						}
+					}
+					else {
+						ImGui::Text("Scene has no light");
+					}
+					ImGui::EndTabItem();
+				}
+			}
+			ImGui::EndTabBar();
+		}
+	}
+	ImGui::End();
 
 	if (ImGui::Begin("Log", &logWindow.open)) {
 		ImGui::BeginChild("scrolling", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar);
@@ -442,6 +545,8 @@ void imguiCommands() {
 			&metricsWindow.frameTimes, static_cast<int>(metricsWindow.frameTimes.size()), 0, nullptr, 0, 100);
 	}
 	ImGui::End();
+
+	ImGui::Render();
 }
 
 void graphicsCommands() {
@@ -450,14 +555,10 @@ void graphicsCommands() {
 	dx12.resetAndMapFrameDataBuffer();
 
 	DX12CommandList& cmdList = dx12.graphicsCommandLists[dx12.currentFrame];
-	cmdList.list->SetDescriptorHeaps(1, &dx12.cbvSrvUavDescriptorHeaps[dx12.currentFrame].heap);
 
 	if (currentSceneIndex < scenes.size()) {
 		const Scene& scene = scenes[currentSceneIndex];
 		if (scene.tlasBuffer.buffer) {
-			DirectX::XMMATRIX viewMat = DirectX::XMMatrixLookAtRH(scene.camera.position, scene.camera.lookAt, scene.camera.up);
-			DirectX::XMMATRIX projMat = DirectX::XMMatrixPerspectiveFovRH(DirectX::XMConvertToRadians(45), static_cast<float>(window.width) / window.height, 1, 1000);
-			DirectX::XMMATRIX viewProjMat = viewMat * projMat;
 			struct {
 				DirectX::XMMATRIX screenToWorldMat;
 				DirectX::XMVECTOR cameraPosition;
@@ -466,13 +567,14 @@ void graphicsCommands() {
 				int frameCount;
 				int lightCount;
 			} constants = {
-					DirectX::XMMatrixTranspose(DirectX::XMMatrixInverse(nullptr, viewProjMat)),
+					DirectX::XMMatrixTranspose(DirectX::XMMatrixInverse(nullptr, scene.camera.viewProjMat)),
 					scene.camera.position,
-					2, 16, 
-					static_cast<int>(dx12.totalFrame % INT_MAX), 
-					static_cast<int>(scene.lightCount)
+					2, 16,
+					static_cast<int>(dx12.totalFrame % INT_MAX),
+					static_cast<int>(scene.lights.size())
 			};
 			uint64 constantsOffset = dx12.appendFrameDataBuffer(&constants, sizeof(constants), D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+			uint64 lightsOffset = dx12.appendFrameDataBuffer(scene.lights.data(), scene.lights.size() * sizeof(scene.lights[0]), sizeof(scene.lights[0])) / sizeof(scene.lights[0]);
 			{
 				DX12Descriptor firstDescriptor = dx12.appendDescriptorCBV(dx12.frameDataBuffers[dx12.currentFrame].buffer, constantsOffset, sizeof(constants));
 				dx12.appendDescriptorUAV(dx12.positionTexture.texture);
@@ -500,6 +602,7 @@ void graphicsCommands() {
 				{
 					PIXScopedEvent(cmdList.list, PIX_COLOR_DEFAULT, "primaryRays");
 
+					cmdList.list->SetDescriptorHeaps(1, &dx12.cbvSrvUavDescriptorHeaps[dx12.currentFrame].heap);
 					cmdList.list->SetPipelineState1(dx12.primaryRayStateObject);
 					D3D12_GPU_VIRTUAL_ADDRESS shaderTablePtr = dx12.frameDataBuffers[dx12.currentFrame].buffer->GetGPUVirtualAddress() + shaderTableOffset;
 					D3D12_DISPATCH_RAYS_DESC dispatchRaysDesc = {};
@@ -514,12 +617,14 @@ void graphicsCommands() {
 			}
 			{
 				DX12Descriptor firstDescriptor = dx12.appendDescriptorCBV(dx12.frameDataBuffers[dx12.currentFrame].buffer, constantsOffset, sizeof(constants));
-				dx12.appendDescriptorUAV(dx12.positionTexture.texture);
-				dx12.appendDescriptorUAV(dx12.normalTexture.texture);
-				dx12.appendDescriptorUAV(dx12.baseColorTexture.texture);
-				dx12.appendDescriptorUAV(dx12.outputTexture.texture);
+				dx12.appendDescriptorSRVTexture(dx12.positionTexture.texture);
+				dx12.appendDescriptorSRVTexture(dx12.normalTexture.texture);
+				dx12.appendDescriptorSRVTexture(dx12.baseColorTexture.texture);
 				dx12.appendDescriptorSRVTLAS(scene.tlasBuffer.buffer);
-				dx12.appendDescriptorSRVStructuredBuffer(scene.lightsBuffer.buffer, 0, scene.lightCount, sizeof(SceneLight));
+				if (scene.lights.size() > 0) {
+					dx12.appendDescriptorSRVStructuredBuffer(dx12.frameDataBuffers[dx12.currentFrame].buffer, lightsOffset, scene.lights.size(), sizeof(scene.lights[0]));
+				}
+				dx12.appendDescriptorUAV(dx12.outputTexture.texture);
 				uint8 shaderTableBuffer[DX12Context::shaderTableRecordSize * 3];
 				memcpy(shaderTableBuffer, dx12.directLightRayObjectProps->GetShaderIdentifier(L"rayGen"), D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
 				memcpy(shaderTableBuffer + D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES, &firstDescriptor.gpuHandle, 8);
@@ -530,6 +635,7 @@ void graphicsCommands() {
 				uint64 shaderTableOffset = dx12.appendFrameDataBuffer(shaderTableBuffer, sizeof(shaderTableBuffer), D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT);
 				{
 					PIXScopedEvent(cmdList.list, PIX_COLOR_DEFAULT, "directLightRays");
+					cmdList.list->SetDescriptorHeaps(1, &dx12.cbvSrvUavDescriptorHeaps[dx12.currentFrame].heap);
 					cmdList.list->SetPipelineState1(dx12.directLightRayStateObject);
 					D3D12_GPU_VIRTUAL_ADDRESS shaderTablePtr = dx12.frameDataBuffers[dx12.currentFrame].buffer->GetGPUVirtualAddress() + shaderTableOffset;
 					D3D12_DISPATCH_RAYS_DESC dispatchRaysDesc = {};
@@ -541,6 +647,12 @@ void graphicsCommands() {
 					dispatchRaysDesc.HitGroupTable = { shaderTablePtr + DX12Context::shaderTableRecordSize * 2, DX12Context::shaderTableRecordSize, DX12Context::shaderTableRecordSize };
 					cmdList.list->DispatchRays(&dispatchRaysDesc);
 				}
+			}
+			{
+				rtxgi::ERTXGIStatus updateStatus = ddgiVolume.Update(ddgiConstantBuffer.buffer, dx12.currentFrame * rtxgi::GetDDGIVolumeConstantBufferSize());
+				assert(updateStatus == rtxgi::OK);
+				rtxgi::ERTXGIStatus updateProbesStatus = ddgiVolume.UpdateProbes(cmdList.list);
+				assert(updateProbesStatus == rtxgi::OK);
 			}
 		}
 	}
@@ -572,6 +684,8 @@ void graphicsCommands() {
 		cmdList.list->RSSetViewports(1, &viewport);
 		cmdList.list->RSSetScissorRects(1, &scissor);
 
+		cmdList.list->SetDescriptorHeaps(1, &dx12.cbvSrvUavDescriptorHeaps[dx12.currentFrame].heap);
+
 		cmdList.list->SetPipelineState(dx12.swapChainPipelineState);
 		cmdList.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 		cmdList.list->SetGraphicsRootSignature(dx12.swapChainRootSignature);
@@ -579,7 +693,6 @@ void graphicsCommands() {
 		cmdList.list->SetGraphicsRootDescriptorTable(0, outputDescriptor.gpuHandle);
 		cmdList.list->DrawInstanced(3, 1, 0, 0);
 
-		ImGui::Render();
 		cmdList.list->SetPipelineState(dx12.imguiPipelineState);
 		float blendFactor[] = { 0.f, 0.f, 0.f, 0.f };
 		cmdList.list->OMSetBlendFactor(blendFactor);
@@ -597,8 +710,8 @@ void graphicsCommands() {
 		cmdList.list->IASetIndexBuffer(&imguiIndexBufferView);
 		cmdList.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-		dx12Assert(imguiVertexBuffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&imguiVertexBuffer.mappedPtr)));
-		dx12Assert(imguiIndexBuffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&imguiIndexBuffer.mappedPtr)));
+		d3dAssert(imguiVertexBuffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&imguiVertexBuffer.mappedPtr)));
+		d3dAssert(imguiIndexBuffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&imguiIndexBuffer.mappedPtr)));
 		uint64 imguiVertexBufferOffset = 0;
 		uint64 imguiIndexBufferOffset = 0;
 		const ImDrawData* imguiDrawData = ImGui::GetDrawData();
@@ -751,7 +864,35 @@ int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
 			}
 		}
 	}
+	{
+		ddgiVolumeDesc.probeGridSpacing = { 1, 1, 1 };
+		ddgiVolumeDesc.probeGridCounts = { 16, 8, 16 };
+		ddgiVolumeDesc.numIrradianceTexels = 4;
+		ddgiVolumeDesc.numDistanceTexels = 16;
+		
+		D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
+		heapDesc.NumDescriptors = 64;
+		heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+		heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+		d3dAssert(dx12.device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&ddgiVolumeResources.descriptorHeap)));
 
+		uint64 constantBufferSize = rtxgi::GetDDGIVolumeConstantBufferSize() * dx12.maxFrameInFlight;
+		ddgiConstantBuffer = dx12.createBuffer(constantBufferSize, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
+		ddgiConstantBuffer.buffer->SetName(L"ddgiConstantBuffer");
+
+		ddgiVolumeResources.descriptorHeapDescSize = dx12.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+		ddgiVolumeResources.device = dx12.device;
+		d3dAssert(D3DReadFileToBlob(L"ProbeBlendingRadianceCS.cso", &ddgiVolumeResources.probeRadianceBlendingCS));
+		d3dAssert(D3DReadFileToBlob(L"ProbeBlendingDistanceCS.cso", &ddgiVolumeResources.probeDistanceBlendingCS));
+		d3dAssert(D3DReadFileToBlob(L"ProbeBorderRowUpdateCS.cso", &ddgiVolumeResources.probeBorderRowCS));
+		d3dAssert(D3DReadFileToBlob(L"ProbeBorderColumnUpdateCS.cso", &ddgiVolumeResources.probeBorderColumnCS));
+		d3dAssert(D3DReadFileToBlob(L"ProbeRelocationCS.cso", &ddgiVolumeResources.probeRelocationCS));
+		d3dAssert(D3DReadFileToBlob(L"ProbeStateClassifierCS.cso", &ddgiVolumeResources.probeStateClassifierCS));
+		d3dAssert(D3DReadFileToBlob(L"ProbeStateClassifierActivateAllCS.cso", &ddgiVolumeResources.probeStateClassifierActivateAllCS));
+
+		rtxgi::ERTXGIStatus ddgiVolumeCreateStatus = ddgiVolume.Create(ddgiVolumeDesc, ddgiVolumeResources);
+		assert(ddgiVolumeCreateStatus == rtxgi::OK);
+	}
 	while (!quit) {
 		updateFrameTime();
 		window.processMessages();

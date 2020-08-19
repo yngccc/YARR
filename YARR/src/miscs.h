@@ -77,6 +77,113 @@ void arrayCopy(T(&dest)[N], T(&src)[N]) {
 	}
 }
 
+float vec3Len(const float* vec) {
+	float len = sqrtf(vec[0] * vec[0] + vec[1] * vec[1] + vec[2] * vec[2]);
+	return len;
+}
+
+void vec3Normalize(float* vec) {
+	float len = vec3Len(vec);
+	assert(len > 0);
+	vec[0] /= len;
+	vec[1] /= len;
+	vec[2] /= len;
+}
+
+void vec3Normalize(const float* vec, float* vecNormalized) {
+	float len = vec3Len(vec);
+	assert(len > 0);
+	vecNormalized[0] = vec[0] / len;
+	vecNormalized[1] = vec[1] / len;
+	vecNormalized[2] = vec[2] / len;
+}
+
+float dotProduct(const float* a, const float* b) {
+	return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+void crossProduct(const float* a, const float* b, float* c) {
+	c[0] = a[1] * b[2] - a[2] * b[1];
+	c[1] = a[2] * b[0] - a[0] * b[2];
+	c[2] = a[0] * b[1] - a[1] * b[0];
+}
+
+void rotationFromAxisAngle(const float* axis, float angle, float* rotation) {
+	float axisNormalized[3];
+	vec3Normalize(axis, axisNormalized);
+	float sin = sinf(angle * 0.5f);
+	float cos = cosf(angle * 0.5f);
+	rotation[0] = axisNormalized[0] * sin;
+	rotation[1] = axisNormalized[1] * sin;
+	rotation[2] = axisNormalized[2] * sin;
+	rotation[3] = cos;
+}
+
+void rotationBetweenVecs(const float* a, const float* b, float* rotation) {
+	float adb = dotProduct(a, b);
+	if (adb < -0.999999f) {
+		float v[3] = { 1, 0, 0 };
+		float txa[3];
+		crossProduct(v, a, txa);
+		if (vec3Len(txa) < 0.000001) {
+			float v[3] = { 0, 1, 0 };
+			crossProduct(v, a, txa);
+		}
+		rotationFromAxisAngle(txa, static_cast<float>(M_PI), rotation);
+	}
+	else if (adb > 0.999999f) {
+		rotation[0] = 0;
+		rotation[1] = 0;
+		rotation[2] = 0;
+		rotation[3] = 1;
+	}
+	else {
+		float axb[3];
+		crossProduct(a, b, axb);
+		rotation[0] = axb[0];
+		rotation[1] = axb[1];
+		rotation[2] = axb[2];
+		rotation[3] = 1 + adb;
+		float len = sqrtf(rotation[0] * rotation[0] + rotation[1] * rotation[1] + rotation[2] * rotation[2] + rotation[3] * rotation[3]);
+		rotation[0] /= len;
+		rotation[1] /= len;
+		rotation[2] /= len;
+		rotation[3] /= len;
+	}
+}
+
+void matFromRotation(const float* rotation, float* mat) {
+	float qxx = rotation[0] * rotation[0];
+	float qyy = rotation[1] * rotation[1];
+	float qzz = rotation[2] * rotation[2];
+	float qxz = rotation[0] * rotation[2];
+	float qxy = rotation[0] * rotation[1];
+	float qyz = rotation[1] * rotation[2];
+	float qwx = rotation[3] * rotation[0];
+	float qwy = rotation[3] * rotation[1];
+	float qwz = rotation[3] * rotation[2];
+
+	mat[0] = 1 - 2 * (qyy + qzz);
+	mat[1] = 2 * (qxy + qwz);
+	mat[2] = 2 * (qxz - qwy);
+	mat[3] = 0;
+
+	mat[4] = 2 * (qxy - qwz);
+	mat[5] = 1 - 2 * (qxx + qzz);
+	mat[6] = 2 * (qyz + qwx);
+	mat[7] = 0;
+
+	mat[8] = 2 * (qxz + qwy);
+	mat[9] = 2 * (qyz - qwx);
+	mat[10] = 1 - 2 * (qxx + qyy);
+	mat[11] = 0;
+
+	mat[12] = 0;
+	mat[13] = 0;
+	mat[14] = 0;
+	mat[15] = 1;
+}
+
 struct Exception {
 	Exception(const char* str) {
 		OutputDebugStringA(str);
@@ -395,7 +502,7 @@ struct Parser {
 			const char* ptr = fileData.data() + filePos;
 			uint64 len = 1;
 			filePos += 1;
-			while (filePos < fileData.size() && (isalnum(static_cast<uint8>(fileData[filePos])) || fileData[filePos] == '.')) {
+			while (filePos < fileData.size() && (isalnum(static_cast<uint8>(fileData[filePos])) || fileData[filePos] == '.' || fileData[filePos] == '+' || fileData[filePos] == '-')) {
 				filePos += 1;
 				len += 1;
 			}

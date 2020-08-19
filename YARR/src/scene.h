@@ -13,9 +13,6 @@
 #define TINYOBJLOADER_IMPLEMENTATION
 #include "../thirdparty/include/tiny_obj_loader.h"
 
-#include "fbxsdk.h"
-#undef snprintf
-
 #include "dx12.h"
 
 struct ModelVertex {
@@ -72,6 +69,9 @@ struct Camera {
 	DirectX::XMVECTOR lookAt = DirectX::XMVectorSet(0, 0, 1, 0);
 	DirectX::XMVECTOR up = DirectX::XMVectorSet(0, 1, 0, 0);
 	float pitchAngle = 0;
+	DirectX::XMMATRIX viewMat;
+	DirectX::XMMATRIX projMat;
+	DirectX::XMMATRIX viewProjMat;
 };
 
 struct SceneInfo {
@@ -80,6 +80,7 @@ struct SceneInfo {
 		Model,
 		Entity,
 		DirectionalLight,
+		PointLight,
 		EndOfFile
 	};
 	Type type;
@@ -90,6 +91,7 @@ struct SceneInfo {
 		float scaling[3];
 		float cameraPosition[3];
 		float lightDirection[3];
+		float lightPosition[3];
 	};
 	union {
 		float translation[3];
@@ -157,6 +159,17 @@ struct SceneParser : public Parser {
 					token.toFloat(c);
 				}
 			}
+			else if (token.str == "PointLight") {
+				info.type = SceneInfo::PointLight;
+				for (auto& d : info.lightPosition) {
+					getToken(token);
+					token.toFloat(d);
+				}
+				for (auto& c : info.lightColor) {
+					getToken(token);
+					token.toFloat(c);
+				}
+			}
 			else {
 				throw Exception("SceneParser::getInfo error: unknown identifer token \"" + std::string(token.str) + "\"");
 			}
@@ -178,12 +191,10 @@ struct Scene {
 	DX12Buffer geometryInfosBuffer;
 	DX12Buffer triangleInfosBuffer;
 	DX12Buffer materialInfosBuffer;
-	DX12Buffer lightsBuffer;
 	uint64 instanceInfoCount = 0;
 	uint64 geometryInfoCount = 0;
 	uint64 triangleInfoCount = 0;
 	uint64 materialInfoCount = 0;
-	uint64 lightCount = 0;
 	std::string name;
 	std::filesystem::path filePath;
 
@@ -225,6 +236,13 @@ struct Scene {
 				arrayCopy(l.color, info.lightColor);
 				lights.push_back(l);
 			}
+			else if (info.type == SceneInfo::PointLight) {
+				SceneLight l;
+				l.type = POINT_LIGHT;
+				arrayCopy(l.position, info.lightPosition);
+				arrayCopy(l.color, info.lightColor);
+				lights.push_back(l);
+			}
 			else if (info.type == SceneInfo::EndOfFile) {
 				break;
 			}
@@ -248,6 +266,11 @@ struct Scene {
 			if (light.type == DIRECTIONAL_LIGHT) {
 				strStream << "DirectionalLight: ["
 					<< light.direction[0] << " " << light.direction[1] << " " << light.direction[2] << "] ["
+					<< light.color[0] << " " << light.color[1] << " " << light.color[2] << "]\n";
+			}
+			else if (light.type == POINT_LIGHT) {
+				strStream << "PointLight: ["
+					<< light.position[0] << " " << light.position[1] << " " << light.position[2] << "] ["
 					<< light.color[0] << " " << light.color[1] << " " << light.color[2] << "]\n";
 			}
 		}
@@ -392,8 +415,8 @@ struct Scene {
 				modelPrimitive.indexBuffer = dx12.createBuffer(modelPrimitive.indices.size(), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
 				uint8* vertexBufferPtr = nullptr;
 				uint8* indexBufferPtr = nullptr;
-				dx12Assert(modelPrimitive.vertexBuffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&vertexBufferPtr)));
-				dx12Assert(modelPrimitive.indexBuffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&indexBufferPtr)));
+				d3dAssert(modelPrimitive.vertexBuffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&vertexBufferPtr)));
+				d3dAssert(modelPrimitive.indexBuffer.buffer->Map(0, nullptr, reinterpret_cast<void**>(&indexBufferPtr)));
 				memcpy(vertexBufferPtr, modelPrimitive.vertices.data(), modelPrimitive.vertices.size() * sizeof(ModelVertex));
 				memcpy(indexBufferPtr, modelPrimitive.indices.data(), modelPrimitive.indices.size());
 				modelPrimitive.vertexBuffer.buffer->Unmap(0, nullptr);
@@ -526,9 +549,6 @@ struct Scene {
 		if (materialInfosBuffer.buffer) {
 			materialInfosBuffer.buffer->Release();
 		}
-		if (lightsBuffer.buffer) {
-			lightsBuffer.buffer->Release();
-		}
 
 		std::vector<std::vector<std::vector<int>>> primitiveIndices;
 		std::vector<GeometryInfo> geometryInfos;
@@ -650,16 +670,6 @@ struct Scene {
 		materialInfosBuffer.buffer->Map(0, nullptr, &materialInfosBufferPtr);
 		memcpy(materialInfosBufferPtr, materialInfos.data(), materialInfos.size() * sizeof(materialInfos[0]));
 		materialInfosBuffer.buffer->Unmap(0, nullptr);
-
-		lightCount = lights.size();
-		if (lightCount > 0) {
-			lightsBuffer = dx12.createBuffer(lights.size() * sizeof(lights[0]), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
-			lightsBuffer.buffer->SetName(L"lightsBuffer");
-			void* lightsBufferPtr = nullptr;
-			lightsBuffer.buffer->Map(0, nullptr, &lightsBufferPtr);
-			memcpy(lightsBufferPtr, lights.data(), lights.size() * sizeof(lights[0]));
-			lightsBuffer.buffer->Unmap(0, nullptr);
-		}
 
 		DX12Buffer tlasInstanceDescsBuffer = dx12.createBuffer(tlasInstanceDescs.size() * sizeof(tlasInstanceDescs[0]), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
 		void* instanceDescsBuffer = nullptr;

@@ -1,20 +1,14 @@
 #include "utils.hlsli"
 #include "sceneStructs.hlsli"
 
-cbuffer constants : register(b0) {
-	float4x4 screenToWorldMat;
-	float4 eyePosition;
-	int bounceCount;
-	int sampleCount;
-	int frameCount;
-};
+ConstantBuffer<SceneConstants> constants : register(b0);
 
 RWTexture2D<float3> positionTexture : register(u0);
 RWTexture2D<float3> normalTexture : register(u1);
 RWTexture2D<float3> baseColorTexture : register(u2);
 RWTexture2D<float3> emissiveTexture : register(u3);
 
-RaytracingAccelerationStructure scene : register(t0);
+RaytracingAccelerationStructure sceneBVH : register(t0);
 StructuredBuffer<InstanceInfo> instanceInfos : register(t1);
 StructuredBuffer<GeometryInfo> geometryInfos : register(t2);
 StructuredBuffer<TriangleInfo> triangleInfos : register(t3);
@@ -27,10 +21,10 @@ void getEyeRay(uint2 dimensions, uint2 pixelIndex, inout float3 origin, inout fl
 	float2 screenPos = (xy / dimensions) * 2.0 - 1.0;
 	screenPos.y = -screenPos.y;
 
-	float4 world = mul(float4(screenPos, 0, 1), screenToWorldMat);
+	float4 world = mul(float4(screenPos, 0, 1), constants.screenToWorldMat);
 	world.xyz /= world.w;
 
-	origin = eyePosition.xyz;
+	origin = constants.eyePosition.xyz;
 	direction = normalize(world.xyz - origin);
 }
 
@@ -56,12 +50,8 @@ void rayGen() {
 	rayDesc.TMin = 0;
 	rayDesc.TMax = 500;
 
-	RayPayload payload;
-	payload.position = float3(0, 0, 0);
-	payload.normal = float3(0, 0, 0);
-	payload.color = float3(0, 0, 0);
-	payload.emissive = float3(0, 0, 0);
-	TraceRay(scene, RAY_FLAG_NONE, 0xff, 0, 0, 0, rayDesc, payload);
+	RayPayload payload = (RayPayload)0;
+	TraceRay(sceneBVH, RAY_FLAG_NONE, 0xff, 0, 0, 0, rayDesc, payload);
 	positionTexture[pixelIndex] = payload.position;
 	normalTexture[pixelIndex] = payload.normal;
 	baseColorTexture[pixelIndex] = payload.color;
@@ -115,9 +105,6 @@ void anyHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes t
 
 [shader("miss")]
 void miss(inout RayPayload payload) {
-	payload.position = float3(0, 0, 0);
-	payload.normal = float3(0, 0, 0);
-	payload.color = float3(0, 0, 0);
-	payload.emissive = float3(0, 0, 0);
+	payload = (RayPayload)0;
 }
 
