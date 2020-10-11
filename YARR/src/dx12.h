@@ -287,7 +287,6 @@ struct DX12Context {
 		static auto imguiPSWriteTime = std::filesystem::last_write_time("imguiPS.cso");
 		static auto primaryRayWriteTime = std::filesystem::last_write_time("primaryRay.cso");
 		static auto directLightRayWriteTime = std::filesystem::last_write_time("directLightRay.cso");
-		static auto probeRayWriteTime = std::filesystem::last_write_time("probeRay.cso");
 
 		auto curSwapChainVSWriteTime = std::filesystem::last_write_time("swapChainVS.cso");
 		auto curSwapChainPSWriteTime = std::filesystem::last_write_time("swapChainPS.cso");
@@ -295,15 +294,13 @@ struct DX12Context {
 		auto curImguiPSWriteTime = std::filesystem::last_write_time("imguiPS.cso");
 		auto curPrimaryRayWriteTime = std::filesystem::last_write_time("primaryRay.cso");
 		auto curDirectLightRayWriteTime = std::filesystem::last_write_time("directLightRay.cso");
-		auto curProbeRayWriteTime = std::filesystem::last_write_time("probeRay.cso");
 
 		bool compileSwapChainShaders = curSwapChainVSWriteTime > swapChainVSWriteTime || curSwapChainPSWriteTime > swapChainPSWriteTime;
 		bool compileImguiShaders = curImguiVSWriteTime > imguiVSWriteTime || curImguiPSWriteTime > imguiPSWriteTime;
 		bool compilePrimaryRayShader = curPrimaryRayWriteTime > primaryRayWriteTime;
 		bool compileDirectLightRayShader = curDirectLightRayWriteTime > directLightRayWriteTime;
-		bool compileProbeRayShader = curProbeRayWriteTime > probeRayWriteTime;
 
-		if (forceCompile || compileSwapChainShaders || compileImguiShaders || compilePrimaryRayShader || compileDirectLightRayShader || compileProbeRayShader) {
+		if (forceCompile || compileSwapChainShaders || compileImguiShaders || compilePrimaryRayShader || compileDirectLightRayShader) {
 			drainGraphicsCommandQueue();
 		}
 		if (forceCompile || compileSwapChainShaders) {

@@ -10,7 +10,6 @@
 
 #include "scene.h"
 #include "test.h"
-#include "rtxgi/ddgi/DDGIVolume.h"
 
 struct Gamepad {
 	XINPUT_STATE prevState = {};
@@ -51,9 +50,6 @@ static Gamepad gamepad;
 static DX12Context dx12;
 static std::vector<Scene> scenes = {};
 static uint64 currentSceneIndex = 0;
-static rtxgi::DDGIVolume ddgiVolume("ddgiVolume");
-static rtxgi::DDGIVolumeDesc ddgiVolumeDesc;
-static rtxgi::DDGIVolumeResources ddgiVolumeResources;
 static DX12Buffer ddgiConstantBuffer;
 static const char* settingsFilePath = "settings.ini";
 static bool quit = false;
@@ -648,12 +644,6 @@ void graphicsCommands() {
 					cmdList.list->DispatchRays(&dispatchRaysDesc);
 				}
 			}
-			{
-				rtxgi::ERTXGIStatus updateStatus = ddgiVolume.Update(ddgiConstantBuffer.buffer, dx12.currentFrame * rtxgi::GetDDGIVolumeConstantBufferSize());
-				assert(updateStatus == rtxgi::OK);
-				rtxgi::ERTXGIStatus updateProbesStatus = ddgiVolume.UpdateProbes(cmdList.list);
-				assert(updateProbesStatus == rtxgi::OK);
-			}
 		}
 	}
 	{
@@ -863,35 +853,6 @@ int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
 				assert(false);
 			}
 		}
-	}
-	{
-		ddgiVolumeDesc.probeGridSpacing = { 1, 1, 1 };
-		ddgiVolumeDesc.probeGridCounts = { 16, 8, 16 };
-		ddgiVolumeDesc.numIrradianceTexels = 4;
-		ddgiVolumeDesc.numDistanceTexels = 16;
-		
-		D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
-		heapDesc.NumDescriptors = 64;
-		heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-		heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-		d3dAssert(dx12.device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&ddgiVolumeResources.descriptorHeap)));
-
-		uint64 constantBufferSize = rtxgi::GetDDGIVolumeConstantBufferSize() * dx12.maxFrameInFlight;
-		ddgiConstantBuffer = dx12.createBuffer(constantBufferSize, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
-		ddgiConstantBuffer.buffer->SetName(L"ddgiConstantBuffer");
-
-		ddgiVolumeResources.descriptorHeapDescSize = dx12.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-		ddgiVolumeResources.device = dx12.device;
-		d3dAssert(D3DReadFileToBlob(L"ProbeBlendingRadianceCS.cso", &ddgiVolumeResources.probeRadianceBlendingCS));
-		d3dAssert(D3DReadFileToBlob(L"ProbeBlendingDistanceCS.cso", &ddgiVolumeResources.probeDistanceBlendingCS));
-		d3dAssert(D3DReadFileToBlob(L"ProbeBorderRowUpdateCS.cso", &ddgiVolumeResources.probeBorderRowCS));
-		d3dAssert(D3DReadFileToBlob(L"ProbeBorderColumnUpdateCS.cso", &ddgiVolumeResources.probeBorderColumnCS));
-		d3dAssert(D3DReadFileToBlob(L"ProbeRelocationCS.cso", &ddgiVolumeResources.probeRelocationCS));
-		d3dAssert(D3DReadFileToBlob(L"ProbeStateClassifierCS.cso", &ddgiVolumeResources.probeStateClassifierCS));
-		d3dAssert(D3DReadFileToBlob(L"ProbeStateClassifierActivateAllCS.cso", &ddgiVolumeResources.probeStateClassifierActivateAllCS));
-
-		rtxgi::ERTXGIStatus ddgiVolumeCreateStatus = ddgiVolume.Create(ddgiVolumeDesc, ddgiVolumeResources);
-		assert(ddgiVolumeCreateStatus == rtxgi::OK);
 	}
 	while (!quit) {
 		updateFrameTime();

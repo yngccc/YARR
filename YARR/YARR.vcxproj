@@ -179,9 +179,6 @@
     </ClCompile>
     <ClCompile Include="thirdparty\include\imgui\imgui_draw.cpp" />
     <ClCompile Include="thirdparty\include\imgui\imgui_widgets.cpp" />
-    <ClCompile Include="thirdparty\include\rtxgi\ddgi\DDGIVolume.cpp" />
-    <ClCompile Include="thirdparty\include\rtxgi\Math.cpp" />
-    <ClCompile Include="thirdparty\include\rtxgi\Random.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\dx12.h" />
@@ -192,14 +189,6 @@
     <ClInclude Include="thirdparty\include\imgui\imgui.h" />
     <ClInclude Include="thirdparty\include\imgui\ImGuizmo.h" />
     <ClInclude Include="thirdparty\include\imgui\imgui_internal.h" />
-    <ClInclude Include="thirdparty\include\rtxgi\Common.h" />
-    <ClInclude Include="thirdparty\include\rtxgi\ddgi\DDGIVolume.h" />
-    <ClInclude Include="thirdparty\include\rtxgi\ddgi\DDGIVolumeDefines.h" />
-    <ClInclude Include="thirdparty\include\rtxgi\ddgi\DDGIVolumeDescGPU.h" />
-    <ClInclude Include="thirdparty\include\rtxgi\Defines.h" />
-    <ClInclude Include="thirdparty\include\rtxgi\Math.h" />
-    <ClInclude Include="thirdparty\include\rtxgi\Random.h" />
-    <ClInclude Include="thirdparty\include\rtxgi\Types.h" />
   </ItemGroup>
   <ItemGroup>
     <FxCompile Include="hlsl\directLightRay.hlsl">
@@ -266,18 +255,6 @@
       <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='Release|x64'">-T lib_6_5 %(AdditionalOptions)</AdditionalOptions>
       <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">-T lib_6_5 %(AdditionalOptions)</AdditionalOptions>
     </FxCompile>
-    <FxCompile Include="hlsl\probeRay.hlsl">
-      <EntryPointName Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-      </EntryPointName>
-      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Library</ShaderType>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.3</ShaderModel>
-      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">-T lib_6_5 %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='Release|x64'">-T lib_6_5 %(AdditionalOptions)</AdditionalOptions>
-      <EntryPointName Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-      </EntryPointName>
-      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Library</ShaderType>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.3</ShaderModel>
-    </FxCompile>
     <FxCompile Include="hlsl\swapChainPS.hlsl">
       <EntryPointName Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">pixelShader</EntryPointName>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>
@@ -293,74 +270,6 @@
       <EntryPointName Condition="'$(Configuration)|$(Platform)'=='Release|x64'">vertexShader</EntryPointName>
       <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.3</ShaderModel>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Vertex</ShaderType>
-    </FxCompile>
-    <FxCompile Include="thirdparty\hlsl\rtxgi\Common.hlsl">
-      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
-      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
-    </FxCompile>
-    <FxCompile Include="thirdparty\hlsl\rtxgi\ddgi\Irradiance.hlsl">
-      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
-      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
-    </FxCompile>
-    <FxCompile Include="thirdparty\hlsl\rtxgi\ddgi\ProbeBlendingDistanceCS.hlsl">
-      <EntryPointName Condition="'$(Configuration)|$(Platform)'=='Release|x64'">DDGIProbeBlendingCS</EntryPointName>
-      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compute</ShaderType>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.3</ShaderModel>
-      <EntryPointName Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">DDGIProbeBlendingCS</EntryPointName>
-      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compute</ShaderType>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.3</ShaderModel>
-    </FxCompile>
-    <FxCompile Include="thirdparty\hlsl\rtxgi\ddgi\ProbeBlendingRadianceCS.hlsl">
-      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compute</ShaderType>
-      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compute</ShaderType>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.3</ShaderModel>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.3</ShaderModel>
-      <EntryPointName Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">DDGIProbeBlendingCS</EntryPointName>
-      <EntryPointName Condition="'$(Configuration)|$(Platform)'=='Release|x64'">DDGIProbeBlendingCS</EntryPointName>
-    </FxCompile>
-    <FxCompile Include="thirdparty\hlsl\rtxgi\ddgi\ProbeBorderColumnUpdateCS.hlsl">
-      <EntryPointName Condition="'$(Configuration)|$(Platform)'=='Release|x64'">DDGIProbeBorderColumnUpdateCS</EntryPointName>
-      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compute</ShaderType>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.3</ShaderModel>
-      <EntryPointName Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">DDGIProbeBorderColumnUpdateCS</EntryPointName>
-      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compute</ShaderType>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.3</ShaderModel>
-    </FxCompile>
-    <FxCompile Include="thirdparty\hlsl\rtxgi\ddgi\ProbeBorderRowUpdateCS.hlsl">
-      <EntryPointName Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">DDGIProbeBorderRowUpdateCS</EntryPointName>
-      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compute</ShaderType>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.3</ShaderModel>
-      <EntryPointName Condition="'$(Configuration)|$(Platform)'=='Release|x64'">DDGIProbeBorderRowUpdateCS</EntryPointName>
-      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compute</ShaderType>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.3</ShaderModel>
-    </FxCompile>
-    <FxCompile Include="thirdparty\hlsl\rtxgi\ddgi\ProbeCommon.hlsl">
-      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
-      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
-    </FxCompile>
-    <FxCompile Include="thirdparty\hlsl\rtxgi\ddgi\ProbeRelocationCS.hlsl">
-      <EntryPointName Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">DDGIProbeRelocationCS</EntryPointName>
-      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compute</ShaderType>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.3</ShaderModel>
-      <EntryPointName Condition="'$(Configuration)|$(Platform)'=='Release|x64'">DDGIProbeRelocationCS</EntryPointName>
-      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compute</ShaderType>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.3</ShaderModel>
-    </FxCompile>
-    <FxCompile Include="thirdparty\hlsl\rtxgi\ddgi\ProbeStateClassifierActivateAllCS.hlsl">
-      <EntryPointName Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">DDGIProbeStateActivateAllCS</EntryPointName>
-      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compute</ShaderType>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.3</ShaderModel>
-      <EntryPointName Condition="'$(Configuration)|$(Platform)'=='Release|x64'">DDGIProbeStateActivateAllCS</EntryPointName>
-      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compute</ShaderType>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.3</ShaderModel>
-    </FxCompile>
-    <FxCompile Include="thirdparty\hlsl\rtxgi\ddgi\ProbeStateClassifierCS.hlsl">
-      <EntryPointName Condition="'$(Configuration)|$(Platform)'=='Release|x64'">DDGIProbeStateClassifierCS</EntryPointName>
-      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compute</ShaderType>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.3</ShaderModel>
-      <EntryPointName Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">DDGIProbeStateClassifierCS</EntryPointName>
-      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compute</ShaderType>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.3</ShaderModel>
     </FxCompile>
   </ItemGroup>
   <ItemGroup>
